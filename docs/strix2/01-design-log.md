@@ -72,10 +72,13 @@ skills. Phase 5 is therefore re-scoped to *model router + cross-run caching + no
 Full detail in `00-codebase-map.md` §7–§10.
 
 ### Open decisions / need maintainer input
-- **Phase 4 PoC semantics (the crux).** Before coding validators, confirm the exact "demonstrated impact"
-  bar per domain (network / cloud / infra) and the candidate→validated promotion rule. The brief gives a
-  strong starting definition; per brief §5 we will not silently pick one. Draft proposal will land in
-  `docs/strix2/04-validator-semantics.md` for sign-off.
+- **Phase 4 PoC semantics (the crux).** Proposal **drafted** in `docs/strix2/04-validator-semantics.md`
+  (two-tier candidate/validated model, per-class impact bar, evidence bundle, ATT&CK/CIS additions, data-
+  model sketch, and 8 numbered ⟐ DECISION points each with a recommended default). **Awaiting sign-off**
+  before any validator code is written — per brief §5 we do not silently pick a definition of "exploited."
+  A single "proceed with the recommended defaults" unblocks implementation. Key positions: build on the
+  existing web gate (unchanged) and the dependency `reachability` gradient rather than reinventing; couple
+  impact-proving to `scope.yaml` + `--allow-intrusive` (read-only proof by default).
 - **Live baseline scan.** Needs (a) Docker daemon started, (b) an LLM API key, (c) authorization to spend
   budget against a local vulnerable app. Awaiting go-ahead before spending.
 - **GitHub fork / push target.** Where should `origin` point?
