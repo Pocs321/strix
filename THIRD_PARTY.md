@@ -1,0 +1,79 @@
+# Third-Party Tools
+
+Strix 2 (like upstream Strix) drives external security tools rather than vendoring their code.
+Per the build brief, every wrapped tool is recorded here with its license and how it is invoked, and
+redistribution compatibility is confirmed before a tool is wrapped.
+
+## Wrapping model (why most of these impose no license obligation on this repo)
+
+- **Subprocess / separate program.** In-sandbox tools are invoked as separate processes via the agent's
+  shell (`exec_command`) inside the prebuilt sandbox image (`ghcr.io/usestrix/strix-sandbox`). Their
+  binaries are installed from distribution packages / upstream releases **in the image**, not copied into
+  this repository. This repo distributes **no** third-party tool source or binaries.
+- **MCP / host-side (Phase 1+).** New domain tools (esp. cloud) are wrapped as MCP servers or host-side
+  modules that shell out to the tool's own CLI. Same separation: we call the tool, we do not link or
+  vendor it.
+- Because invocation is at arm's length (separate process, separate distribution), copyleft licenses
+  (GPL/AGPL/LGPL) on a wrapped CLI do **not** extend to Strix 2's own code. We still record them, and we
+  will not vendor or statically link any incompatible code. This repository's own license is Apache-2.0
+  (see `LICENSE`).
+
+> **Confidence column.** ✅ = verified against the project's LICENSE. ⚠️ = commonly-cited license,
+> **confirm at wrap time**. Anything wrapped in Phase 1+ gets its row promoted to ✅ with a link when the
+> wrapper lands.
+
+## Already relied upon — bundled in the sandbox image (`containers/Dockerfile`)
+
+Invoked in-sandbox via shell; not redistributed by this repo.
+
+| Tool | Purpose | License | Conf. |
+|---|---|---|---|
+| nmap | host/port/service discovery | Nmap Public Source License (NPSL; GPLv2-derived, custom terms) | ⚠️ |
+| naabu | fast port scan | MIT (ProjectDiscovery) | ✅ |
+| httpx | HTTP probing | MIT (ProjectDiscovery) | ✅ |
+| katana | crawler | MIT (ProjectDiscovery) | ✅ |
+| subfinder | subdomain enum | MIT (ProjectDiscovery) | ✅ |
+| nuclei | templated checks | MIT (ProjectDiscovery) | ✅ |
+| interactsh-client | OOB interaction | MIT (ProjectDiscovery) | ✅ |
+| vulnx (cvemap) | CVE lookup | MIT (ProjectDiscovery) | ⚠️ |
+| gospider | crawler | MIT | ⚠️ |
+| govulncheck | Go vuln scan | BSD-3-Clause (golang.org/x/vuln) | ✅ |
+| sqlmap | SQLi exploitation | GPL-2.0 | ✅ |
+| ffuf | fuzzing | MIT | ✅ |
+| wapiti | web scanner | GPL-2.0 | ⚠️ |
+| trivy | container/IaC/vuln scan | Apache-2.0 | ✅ |
+| semgrep | SAST | LGPL-2.1 (CLI) | ⚠️ |
+| bandit | Python SAST | Apache-2.0 | ✅ |
+| ast-grep | structural search | MIT | ✅ |
+| trufflehog | secret scanning | AGPL-3.0 | ⚠️ |
+| gitleaks | secret scanning | MIT | ✅ |
+| retire.js | JS dep vuln scan | Apache-2.0 | ⚠️ |
+| arjun | param discovery | GPL-3.0 | ⚠️ |
+| dirsearch | content discovery | GPL-2.0 | ⚠️ |
+| wafw00f | WAF fingerprint | BSD-3-Clause | ⚠️ |
+| jwt_tool | JWT testing | GPL-3.0 | ⚠️ |
+| agent-browser | headless browser driver | (verify) | ⚠️ |
+| Caido CLI | HTTP proxy | proprietary/free tier (verify redistribution) | ⚠️ |
+
+> `masscan` and `checkov` are **not** in the current image; if wrapped later, add rows
+> (masscan: AGPL-3.0; checkov: Apache-2.0 — confirm at wrap time).
+
+## To be wrapped — Phase 1 (network / cloud / infra / API)
+
+Rows are provisional targets; each is confirmed and promoted to ✅ when its wrapper lands.
+
+| Tool | Domain | Planned wrap | License (to confirm) |
+|---|---|---|---|
+| prowler | cloud (AWS/Azure/GCP) misconfig | host-side MCP (creds stay on host) | Apache-2.0 ⚠️ |
+| ScoutSuite | cloud multi-provider audit | host-side MCP | GPL-2.0 ⚠️ |
+| CloudFox | cloud attack-path enum | host-side MCP | Apache-2.0 / MIT ⚠️ |
+| AWS CLI (botocore) | cloud API calls (validation PoC) | host-side MCP / native tool | Apache-2.0 ⚠️ |
+| checkov | IaC static analysis | in-sandbox or MCP | Apache-2.0 ⚠️ |
+| nuclei | infra templated checks (already present) | native/skill sequencing | MIT ✅ |
+
+## Method for confirming a license before wrapping
+1. Read the tool's `LICENSE` at the pinned version.
+2. Confirm we invoke it as a separate process (no linking/vendoring of its code).
+3. Record the version pinned in the image / wrapper here.
+4. If a tool's license would require redistributing source when we distribute *it* — we don't distribute
+   it (it's fetched at image-build / install time), so the obligation doesn't attach; note that explicitly.
