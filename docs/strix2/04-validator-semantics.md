@@ -1,10 +1,10 @@
 # Phase 4 — Generalized Finding + PoC Validator Semantics
 
-> **Status: PROPOSAL — needs maintainer sign-off before any code is written.**
-> Per build brief §5/§6 ("don't silently pick a definition of 'exploited'"), this document proposes the
-> two-tier finding model and the per-class "demonstrated impact" bar. Sections marked **⟐ DECISION**
-> are the calls I will not make unilaterally. Each carries a *recommended default* so a "yes to all
-> defaults" is a complete answer.
+> **Status: ACCEPTED (2026-09-26) — all 8 ⟐ DECISIONs adopted at their recommended defaults.**
+> Implementation is proceeding on this basis. The candidate (lead) tier — schema, store, tools, and
+> run-time registration — has landed (see `01-design-log.md`, Phase 4); remaining work (network/cloud
+> validated classes, the Leads section in the executive report, scope-coupled proof) follows in Phase
+> 3/4. If any decision is revisited, this doc is updated first and the affected code revised.
 
 Grounded in the current code (see `00-codebase-map.md` §5): `create_vulnerability_report`
 (`strix/tools/reporting/tool.py`), `create_dependency_report`, and `ReportState`
@@ -197,15 +197,20 @@ Additive, rebase-safe — mirrors how `create_dependency_report` was added as a 
 
 This is exactly the discrimination the brief demands: the S3 issue validates, the port stays a lead.
 
-## 9. Consolidated decisions needed
-- **3a** candidate↔validated dedup (default: yes)
-- **3b** persist candidates + Leads section (default: yes)
-- **4.2a** version-only CVE stays candidate (default: yes)
-- **4.3a** require named least-priv/anonymous principal, refuse admin-creds validation (default: yes)
-- **4.3b** exfil limit = metadata + ≤1 KiB/hash (default: yes)
-- **4.5a** dependency reachability → validated vs leads split (default: yes)
-- **5a** auto re-run scripts for read-only only (default: yes)
-- **6a** ATT&CK/CIS optional, prompted per class (default: yes)
+## 9. Consolidated decisions — ACCEPTED (defaults adopted 2026-09-26)
+- **3a** ✅ candidate↔validated dedup — structural dedup implemented in `CandidateStore.add`; semantic
+  (LLM) dedup via `dedupe.py` is a follow-up.
+- **3b** ✅ persist candidates (`candidates.json`) — implemented; Leads section in the executive report is
+  a follow-up (needs a small, logged `report/writer.py` edit).
+- **4.2a** ✅ version-only CVE stays a candidate.
+- **4.3a** ✅ require a named least-priv/`anonymous` principal; refuse validating with ambient admin creds.
+- **4.3b** ✅ cloud exfil limit = metadata + ≤1 KiB head/hash.
+- **4.5a** ✅ dependency reachability → validated vs Leads split.
+- **5a** ✅ auto re-run scripts for read-only proofs only.
+- **6a** ✅ ATT&CK/CIS optional, prompted per class; never blocks a finding.
 
-A single "proceed with the recommended defaults" unblocks Phase 4 implementation. Any override, and I'll
-revise this doc before coding.
+Landed so far: the candidate data model (`strix/candidates/`), the `create_candidate` / `list_candidates`
+/ `promote_candidate` / `dismiss_candidate` tools (`strix/tools/candidates/`), and run-time registration
+(`strix/strix2_ext.py`, one-line hook in `core/runner.py`). Not yet: network/cloud validated finding
+classes and their evidence channels, the Leads section in the report, and scope-coupled proof (depends on
+Phase 1 scope enforcement).

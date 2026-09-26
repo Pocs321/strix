@@ -16,7 +16,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 ## Core-file changes (upstream files we edited)
 | File | Change | Reason | Phase |
 |---|---|---|---|
-| _(none yet)_ | | | |
+| `strix/core/runner.py` | +1 import, +1 call to `install_strix2_extensions(run_dir)` after `set_scan_id` in `run_strix_scan` | Single, idempotent hook to register Strix 2's additive tools/stores at run start via the built-in `register_agent_tools` seam (which had no upstream callers). 2 lines added, none changed. | 4 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -72,16 +72,14 @@ skills. Phase 5 is therefore re-scoped to *model router + cross-run caching + no
 Full detail in `00-codebase-map.md` §7–§10.
 
 ### Open decisions / need maintainer input
-- **Phase 4 PoC semantics (the crux).** Proposal **drafted** in `docs/strix2/04-validator-semantics.md`
-  (two-tier candidate/validated model, per-class impact bar, evidence bundle, ATT&CK/CIS additions, data-
-  model sketch, and 8 numbered ⟐ DECISION points each with a recommended default). **Awaiting sign-off**
-  before any validator code is written — per brief §5 we do not silently pick a definition of "exploited."
-  A single "proceed with the recommended defaults" unblocks implementation. Key positions: build on the
-  existing web gate (unchanged) and the dependency `reachability` gradient rather than reinventing; couple
-  impact-proving to `scope.yaml` + `--allow-intrusive` (read-only proof by default).
+- **Phase 4 PoC semantics (the crux).** ✅ **Signed off 2026-09-26** — all 8 decisions adopted at their
+  recommended defaults (see `04-validator-semantics.md`). Candidate tier implemented (see Phase 4 below).
 - **Live baseline scan.** Needs (a) Docker daemon started, (b) an LLM API key, (c) authorization to spend
-  budget against a local vulnerable app. Awaiting go-ahead before spending.
-- **GitHub fork / push target.** Where should `origin` point?
+  budget against a local vulnerable app. Maintainer confirmed **OpenRouter** as the intended provider —
+  supported natively via LiteLLM (`openrouter/<model>` + `LLM_API_KEY`); still awaiting the key + a
+  `--max-budget-usd` ceiling before running (won't spend unprompted).
+- **GitHub fork / push target.** Where should `origin` point? (Still unset; CI unverified on a real Linux
+  runner until a push happens.)
 
 ### Phase 0 acceptance status
 - [x] Codebase map complete → `00-codebase-map.md`
@@ -89,3 +87,33 @@ Full detail in `00-codebase-map.md` §7–§10.
 - [x] `scope.yaml` schema drafted **and loaded** (enforcement stubbed) → `strix/scope/`, `scope.yaml`
 - [x] CI runs upstream + new tests → `.github/workflows/ci.yml` (+ `tests/test_strix2_scope.py`)
 - [ ] Baseline scan produces a validated web finding with a PoC → **blocked** (Docker daemon + API key + budget go-ahead)
+
+---
+
+## Phase 4 — Generalized finding + PoC validator (in progress)
+
+Semantics signed off (`04-validator-semantics.md`, all defaults). Landed the **candidate (lead) tier** —
+the low-bar half of the two-tier model — as an additive package plus one 2-line hook in `core/runner.py`.
+
+**Built:**
+- `strix/candidates/` — `Candidate` schema (pydantic, `extra=forbid`, `dedup_key`, status lifecycle) and
+  `CandidateStore` (in-run store, `cand-NNNN` ids, structural dedup against open candidates *and* validated
+  findings per decision 3a, persists `candidates.json` beside `vulnerabilities.json`, promote/dismiss).
+- `strix/tools/candidates/tools.py` — `create_candidate`, `list_candidates`, `promote_candidate`,
+  `dismiss_candidate` (`@function_tool`s). Deliberately omits `from __future__ import annotations` so the
+  SDK resolves the `RunContextWrapper` context annotation at registration without a ruff `TC002` ignore.
+- `strix/strix2_ext.py::install_strix2_extensions(run_dir)` — idempotent bootstrap that registers the
+  candidate tools via the (previously caller-less) `register_agent_tools` seam and binds the store to the
+  run dir. Wired in at the top of `run_strix_scan` (the single core edit).
+- `tests/test_strix2_candidates.py` — 13 tests (schema, dedup incl. cross-tier, lifecycle, persistence,
+  registration/idempotency). All green; ruff + mypy clean. CI blocking gate extended to lint+typecheck the
+  new code.
+
+**Design choices:** candidates are a *separate* store (no edit to `ReportState`) so they stay rebaseable;
+they never enter the finding count; dedup is structural now (deterministic/testable), with semantic LLM
+dedup as a follow-up. Attribution (`agent_id`/`agent_name`) is captured on each candidate.
+
+**Not yet (next Phase 3/4 steps):** network/cloud *validated* finding classes + their evidence channels
+(captured request/response, cloud principal + denying policy, runtime repro); the "Leads (unvalidated)"
+section in the executive report (small logged `report/writer.py` edit); scope-coupled proof (needs Phase 1
+enforcement); MITRE ATT&CK/CIS optional fields on the validated schema.

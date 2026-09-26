@@ -51,7 +51,10 @@ jobs:
         # Gate strictly on our own code. Full-repo lint runs in the non-blocking
         # baseline job — upstream carries a newer-ruff unused-noqa (it lints via a
         # pre-commit-pinned ruff, older than this dev-dep ruff), which is not ours to gate on.
-        run: uv run ruff check strix/scope tests/test_strix2_*.py
+        run: uv run ruff check strix/scope strix/candidates strix/tools/candidates strix/strix2_ext.py tests/test_strix2_*.py
+
+      - name: Mypy (Strix 2 code)
+        run: uv run mypy strix/scope strix/candidates strix/tools/candidates strix/strix2_ext.py
 
       - name: Strix 2 import smoke test
         run: uv run python -c "import strix; import strix.scope; from strix.scope import load_scope_policy, ScopePolicy; print('strix + strix.scope import OK')"
