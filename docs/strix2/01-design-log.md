@@ -17,6 +17,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | File | Change | Reason | Phase |
 |---|---|---|---|
 | `strix/core/runner.py` | +1 import, +1 call to `install_strix2_extensions(run_dir)` after `set_scan_id` in `run_strix_scan` | Single, idempotent hook to register Strix 2's additive tools/stores at run start via the built-in `register_agent_tools` seam (which had no upstream callers). 2 lines added, none changed. | 4 |
+| `strix/report/writer.py` | +2 imports, `write_executive_report` appends a best-effort "Leads (unvalidated)" section via new `_strix2_leads_section()` | Surface candidate leads in the report `strix view` renders. Guarded/no-op when the candidate store is absent or empty, so upstream-only runs are unchanged. | 4 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -113,7 +114,11 @@ the low-bar half of the two-tier model — as an additive package plus one 2-lin
 they never enter the finding count; dedup is structural now (deterministic/testable), with semantic LLM
 dedup as a follow-up. Attribution (`agent_id`/`agent_name`) is captured on each candidate.
 
+**Leads rendering (decision 3b) — done.** `strix/candidates/writer.py` renders `LEADS.md` (written by the
+store on every persist) and the "Leads (unvalidated)" section appended to `penetration_test_report.md`
+(one guarded, logged `write_executive_report` edit — no-op for upstream-only runs). 5 more tests; report
+writer + import-warmup suites stay green (119 passed).
+
 **Not yet (next Phase 3/4 steps):** network/cloud *validated* finding classes + their evidence channels
-(captured request/response, cloud principal + denying policy, runtime repro); the "Leads (unvalidated)"
-section in the executive report (small logged `report/writer.py` edit); scope-coupled proof (needs Phase 1
-enforcement); MITRE ATT&CK/CIS optional fields on the validated schema.
+(captured request/response, cloud principal + denying policy, runtime repro); scope-coupled proof (needs
+Phase 1 enforcement); MITRE ATT&CK/CIS optional fields on the validated schema.

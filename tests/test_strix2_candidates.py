@@ -12,6 +12,8 @@ from strix.agents.factory import registered_agent_tools
 from strix.candidates import CandidateStore, normalize_target
 from strix.candidates.schema import Candidate, structural_match
 from strix.candidates.store import get_candidate_store, reset_candidate_store, set_candidate_store
+from strix.candidates.writer import render_leads_markdown, write_leads
+from strix.report.writer import write_executive_report
 from strix.strix2_ext import install_strix2_extensions
 
 
@@ -161,3 +163,56 @@ def test_reset_candidate_store_rebinds_on_new_run(tmp_path: Path) -> None:
     other = reset_candidate_store(tmp_path / "runB")
     assert a is same  # same run dir keeps the store (resume-safe)
     assert other is not a  # a new run dir rebinds
+
+
+# --- leads rendering (B) -----------------------------------------------------
+
+def test_render_leads_groups_and_labels_status() -> None:
+    store = CandidateStore()
+    store.add(title="Port 3306 open", target="10.0.0.5", domain="network", source="nmap",
+              rationale="mysql exposed")
+    store.add(title="Public bucket", target="s3://b", domain="cloud", source="prowler",
+              rationale="policy public")
+    store.add(title="Stale lead", target="x", domain="web", source="reasoning", rationale="r")
+    store.promote("cand-0001", "vuln-0009")
+    store.dismiss("cand-0003", "benign redirect")
+
+    md = render_leads_markdown(store.all_candidates())
+    assert "# Leads (unvalidated)" in md
+    assert "1 open" in md and "1 promoted" in md and "1 dismissed" in md
+    assert "### cloud" in md  # open lead grouped by domain
+    assert "vuln-0009" in md  # promoted link
+    assert "benign redirect" in md  # dismissal reason
+
+
+def test_render_leads_is_empty_without_candidates() -> None:
+    assert render_leads_markdown([]) == ""
+
+
+def test_write_leads_creates_and_removes_file(tmp_path: Path) -> None:
+    store = CandidateStore(run_dir=tmp_path)
+    store.add(title="Open port", target="10.0.0.5", domain="network", source="nmap", rationale="r")
+    assert (tmp_path / "LEADS.md").exists()  # written on persist
+    write_leads(tmp_path, [])  # no candidates -> file removed
+    assert not (tmp_path / "LEADS.md").exists()
+
+
+def test_executive_report_appends_open_leads(tmp_path: Path) -> None:
+    reset_candidate_store(tmp_path)
+    store = get_candidate_store()
+    assert store is not None
+    store.add(title="Port 8080 open", target="10.0.0.5", domain="network", source="nmap",
+              rationale="service present, no demonstrated impact")
+
+    write_executive_report(tmp_path, "Executive summary body.")
+    report = (tmp_path / "penetration_test_report.md").read_text(encoding="utf-8")
+    assert "Executive summary body." in report
+    assert "Leads (unvalidated)" in report
+    assert "Port 8080 open" in report
+
+
+def test_executive_report_has_no_leads_section_when_none(tmp_path: Path) -> None:
+    set_candidate_store(None)
+    write_executive_report(tmp_path, "Body only.")
+    report = (tmp_path / "penetration_test_report.md").read_text(encoding="utf-8")
+    assert "Leads (unvalidated)" not in report

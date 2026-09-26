@@ -14,6 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from strix.candidates.schema import Candidate, CandidateStatus, structural_match
+from strix.candidates.writer import write_leads
 
 
 if TYPE_CHECKING:
@@ -143,8 +144,9 @@ class CandidateStore:
             path = self.run_dir / _CANDIDATES_FILENAME
             payload = [c.model_dump() for c in self.candidates]
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_leads(self.run_dir, self.candidates)
         except OSError:
-            logger.warning("Could not persist candidates.json to %s", self.run_dir, exc_info=True)
+            logger.warning("Could not persist candidates to %s", self.run_dir, exc_info=True)
 
 
 _global_candidate_store: CandidateStore | None = None
