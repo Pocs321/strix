@@ -18,12 +18,14 @@ from typing import TYPE_CHECKING
 
 from strix.agents.factory import register_agent_tools
 from strix.candidates.store import reset_candidate_store
+from strix.scope.enforcement import load_active_policy
 from strix.tools.candidates.tools import (
     create_candidate,
     dismiss_candidate,
     list_candidates,
     promote_candidate,
 )
+from strix.tools.scope.tools import check_scope, scope_status
 
 
 if TYPE_CHECKING:
@@ -32,11 +34,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CANDIDATE_TOOLS = (create_candidate, list_candidates, promote_candidate, dismiss_candidate)
+_STRIX2_TOOLS = (
+    create_candidate,
+    list_candidates,
+    promote_candidate,
+    dismiss_candidate,
+    check_scope,
+    scope_status,
+)
 
 
 def install_strix2_extensions(run_dir: Path | None = None) -> None:
-    """Register Strix 2 tools and bind per-run stores. Idempotent."""
+    """Register Strix 2 tools, bind per-run stores, and load the scope policy.
+
+    Idempotent. The scope policy is resolved from ``scope.yaml`` /
+    ``$STRIX_SCOPE_CONFIG`` (with ``--allow-intrusive`` via ``STRIX_ALLOW_INTRUSIVE``)
+    and set active for the run; absent, enforcement stays inactive.
+    """
     reset_candidate_store(run_dir)
-    register_agent_tools(*_CANDIDATE_TOOLS)
-    logger.info("Strix 2 extensions installed (candidate tools registered, run_dir=%s)", run_dir)
+    load_active_policy()
+    register_agent_tools(*_STRIX2_TOOLS)
+    logger.info("Strix 2 extensions installed (tools registered, run_dir=%s)", run_dir)

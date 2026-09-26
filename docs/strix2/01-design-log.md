@@ -18,6 +18,8 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 |---|---|---|---|
 | `strix/core/runner.py` | +1 import, +1 call to `install_strix2_extensions(run_dir)` after `set_scan_id` in `run_strix_scan` | Single, idempotent hook to register Strix 2's additive tools/stores at run start via the built-in `register_agent_tools` seam (which had no upstream callers). 2 lines added, none changed. | 4 |
 | `strix/report/writer.py` | +2 imports, `write_executive_report` appends a best-effort "Leads (unvalidated)" section via new `_strix2_leads_section()` | Surface candidate leads in the report `strix view` renders. Guarded/no-op when the candidate store is absent or empty, so upstream-only runs are unchanged. | 4 |
+| `strix/tools/mcp/agent_tools.py` | +1 import, `call_mcp` calls new `_scope_denial(arguments)` before dispatch | Enforce `scope.yaml` at the MCP boundary the brief names. No-op when no policy is loaded / no high-confidence target found, so upstream MCP behavior is unchanged. | 1 |
+| `strix/interface/cli_args.py` | Added `--scope-config` and `--allow-intrusive` flags → set `STRIX_SCOPE_CONFIG` / `STRIX_ALLOW_INTRUSIVE` env (mirrors the existing `--mcp-*` pattern) | Let the operator point at a scope file and gate intrusive actions from the CLI. | 1 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -90,6 +92,26 @@ Full detail in `00-codebase-map.md` §7–§10.
 - [ ] Baseline scan produces a validated web finding with a PoC → **blocked** (Docker daemon + API key + budget go-ahead)
 
 ---
+
+## Phase 1 — Scope enforcement (core landed; MCP wrappers pending)
+
+Enforcement engine + boundary wiring + CLI gate, all tested. **What's left of Phase 1: the actual MCP
+wrapper servers** (nmap/naabu/masscan; prowler/ScoutSuite/CloudFox; nuclei/trivy/checkov; API contract)
+with tight `allowed_tools` — a separate, larger chunk not yet started.
+
+**Built:**
+- `strix/scope/enforcement.py` — active-policy holder (`get/set_active_policy`), `load_active_policy`
+  (reads `scope.yaml`/`$STRIX_SCOPE_CONFIG`, applies `--allow-intrusive`/`STRIX_ALLOW_INTRUSIVE`),
+  conservative `extract_targets` (URLs/ARNs/IPv4/12-digit only — bare hostnames excluded to avoid
+  false-positives), `enforce_target`, `enforce_arguments`.
+- `strix/tools/scope/tools.py` — `check_scope(target, intrusive)` and `scope_status` agent tools.
+- Wired into `call_mcp` (guarded, no-op without a policy) and loaded at run start in `strix2_ext`.
+- `--scope-config` / `--allow-intrusive` CLI flags.
+- Tests: `tests/test_strix2_scope_enforcement.py` (extraction, checks, intrusive gate, loading/overrides).
+
+**Compatibility stance (documented):** enforcement is active only when a `scope.yaml` is loaded; absent,
+upstream web/MCP behavior is unchanged. The "fail-closed without scope" requirement applies to the new
+intrusive domains (network/cloud), enforced inside those tools when they land in Phase 3.
 
 ## Phase 4 — Generalized finding + PoC validator (in progress)
 

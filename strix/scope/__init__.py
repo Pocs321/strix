@@ -13,6 +13,14 @@ boundary.
 
 from __future__ import annotations
 
+from strix.scope.enforcement import (
+    enforce_arguments,
+    enforce_target,
+    extract_targets,
+    get_active_policy,
+    load_active_policy,
+    set_active_policy,
+)
 from strix.scope.loader import (
     DEFAULT_SCOPE_FILENAMES,
     ScopeConfigError,
@@ -37,5 +45,11 @@ __all__ = [
     "ScopeDecision",
     "ScopePolicy",
     "WebScope",
+    "enforce_arguments",
+    "enforce_target",
+    "extract_targets",
+    "get_active_policy",
+    "load_active_policy",
     "load_scope_policy",
+    "set_active_policy",
 ]

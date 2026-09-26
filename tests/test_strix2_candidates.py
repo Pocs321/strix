@@ -14,6 +14,7 @@ from strix.candidates.schema import Candidate, structural_match
 from strix.candidates.store import get_candidate_store, reset_candidate_store, set_candidate_store
 from strix.candidates.writer import render_leads_markdown, write_leads
 from strix.report.writer import write_executive_report
+from strix.scope.enforcement import get_active_policy, set_active_policy
 from strix.strix2_ext import install_strix2_extensions
 
 
@@ -24,16 +25,23 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def _isolate_globals() -> Iterator[None]:
-    """Keep the shared tool registry and candidate store from leaking across tests."""
+    """Keep shared globals (tool registry, candidate store, scope policy) from leaking.
+
+    ``install_strix2_extensions`` loads ``scope.yaml`` from cwd, so it can set an
+    active policy; reset it too, or a later test's ``call_mcp`` would enforce it.
+    """
     saved_tools = list(factory._EXTRA_TOOLS)
     saved_store = get_candidate_store()
+    saved_policy = get_active_policy()
     factory._EXTRA_TOOLS.clear()
     set_candidate_store(None)
+    set_active_policy(None)
     try:
         yield
     finally:
         factory._EXTRA_TOOLS[:] = saved_tools
         set_candidate_store(saved_store)
+        set_active_policy(saved_policy)
 
 
 # --- schema ------------------------------------------------------------------
