@@ -27,8 +27,6 @@ class SourceIdentityKind(StrEnum):
 class PreparationState(StrEnum):
     PREPARING = "preparing"
     READY = "ready"
-    READY_WITH_GAPS = "ready_with_gaps"
-    NEEDS_REVIEW = "needs_review"
     BLOCKED = "blocked"
     FAILED = "failed"
     STALE = "stale"
@@ -39,6 +37,11 @@ class CheckStatus(StrEnum):
     FAILED = "failed"
     UNAVAILABLE = "unavailable"
     CANCELLED = "cancelled"
+
+
+class VerificationTarget(StrEnum):
+    BASE = "base"
+    PATCHED = "patched"
 
 
 class VerificationDecision(StrEnum):
@@ -52,6 +55,22 @@ class RepairStatus(StrEnum):
     BLOCKED = "blocked"
     BUDGET_EXHAUSTED = "budget_exhausted"
     INCOMPLETE = "incomplete"
+
+
+class BlockerKind(StrEnum):
+    SOURCE = "source"
+    ENVIRONMENT = "environment"
+    REPOSITORY_BASELINE = "repository_baseline"
+    CREDENTIAL = "credential"
+    EXTERNAL_CONFIGURATION = "external_configuration"
+    SECURITY_EVIDENCE = "security_evidence"
+
+
+class PreparationBlocker(ContractModel):
+    kind: BlockerKind
+    summary: str = Field(min_length=1)
+    user_action: str = Field(min_length=1)
+    details: list[str] = []
 
 
 class SourceIdentity(ContractModel):
@@ -161,7 +180,7 @@ class FixPreparationRequestV1(ContractModel):
     repository_id: str | None = None
     candidate: FixCandidateV1
     checks: list[CommandSpec] = []
-    max_repair_attempts: int = Field(default=4, ge=1, le=4)
+    max_repair_attempts: int = Field(default=2, ge=1, le=2)
     timeout_seconds: int = Field(default=1800, ge=30, le=14400)
     network_allowed: bool = False
     credentials_allowed: list[str] = []
@@ -175,6 +194,9 @@ class CheckResult(ContractModel):
     duration_seconds: float = Field(ge=0)
     output: str = ""
     required: bool = True
+    target: VerificationTarget | None = None
+    baseline_status: CheckStatus | None = None
+    baseline_output: str | None = None
 
 
 class VerifierResult(ContractModel):
@@ -186,6 +208,9 @@ class VerifierResult(ContractModel):
     sibling_paths_reviewed: list[str] = []
     preserved_behaviors: list[str] = []
     gaps: list[str] = []
+    security_tests: list[CheckResult] = []
+    repairable: bool = False
+    blocker: PreparationBlocker | None = None
 
 
 class RepairOutcome(ContractModel):
@@ -194,6 +219,7 @@ class RepairOutcome(ContractModel):
     gaps: list[str] = []
     reproduction_command: CommandSpec | None = None
     turns_used: int = Field(default=0, ge=0)
+    blocker: PreparationBlocker | None = None
 
 
 class FixPreparationAttempt(ContractModel):
@@ -201,7 +227,7 @@ class FixPreparationAttempt(ContractModel):
     repair: RepairOutcome
     checks: list[CheckResult] = []
     security_reproduction: CheckResult | None = None
-    verifier: VerifierResult
+    verifier: VerifierResult | None = None
     workspace_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
@@ -231,6 +257,7 @@ class FixPreparationResultV1(ContractModel):
     verifier: VerifierResult | None = None
     attempt_history: list[FixPreparationAttempt] = []
     gaps: list[str] = []
+    blocker: PreparationBlocker | None = None
     attempts: int = Field(default=0, ge=0)
     elapsed_seconds: float = Field(default=0, ge=0)
     cost_usd: float | None = Field(default=None, ge=0)

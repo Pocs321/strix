@@ -1,6 +1,7 @@
 """Verified fix preparation contracts and runtime."""
 
 from strix.fix.contracts import (
+    BlockerKind,
     CandidateLocation,
     CheckResult,
     CheckStatus,
@@ -11,6 +12,7 @@ from strix.fix.contracts import (
     FixPreparationAttempt,
     FixPreparationRequestV1,
     FixPreparationResultV1,
+    PreparationBlocker,
     PreparationState,
     RepairOutcome,
     RepairStatus,
@@ -18,6 +20,7 @@ from strix.fix.contracts import (
     SourceIdentity,
     SourceIdentityKind,
     VerificationDecision,
+    VerificationTarget,
     VerifierResult,
     candidate_from_legacy_report,
 )
@@ -31,6 +34,7 @@ from strix.fix.prepare import (
 
 
 __all__ = [
+    "BlockerKind",
     "CandidateLocation",
     "CheckResult",
     "CheckStatus",
@@ -41,6 +45,7 @@ __all__ = [
     "FixPreparationAttempt",
     "FixPreparationRequestV1",
     "FixPreparationResultV1",
+    "PreparationBlocker",
     "PreparationCancelledError",
     "PreparationContext",
     "PreparationPolicy",
@@ -51,6 +56,7 @@ __all__ = [
     "SourceIdentity",
     "SourceIdentityKind",
     "VerificationDecision",
+    "VerificationTarget",
     "VerifierResult",
     "build_git_manifest",
     "candidate_from_legacy_report",

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from strix.fix.contracts import (
+    BlockerKind,
     CheckResult,
     CheckStatus,
     CommandSpec,
@@ -23,13 +24,15 @@ from strix.fix.contracts import (
     FixPreparationAttempt,
     FixPreparationRequestV1,
     FixPreparationResultV1,
+    PreparationBlocker,
     PreparationState,
     RepairOutcome,
     RepairStatus,
     VerificationDecision,
+    VerificationTarget,
     VerifierResult,
 )
-from strix.fix.locations import AnchorStatus, anchor_candidate
+from strix.fix.locations import AnchorStatus, anchor_location
 
 
 class PreparationCancelledError(RuntimeError):
@@ -43,13 +46,13 @@ CancellationCheck = Callable[[], bool]
 
 @dataclass(slots=True)
 class PreparationPolicy:
-    max_repair_attempts: int = 4
+    max_repair_attempts: int = 2
     timeout_seconds: int = 1800
     max_output_chars: int = 20000
 
     def __post_init__(self) -> None:
-        if not 1 <= self.max_repair_attempts <= 4:
-            raise ValueError("max_repair_attempts must be between 1 and 4")
+        if not 1 <= self.max_repair_attempts <= 2:
+            raise ValueError("max_repair_attempts must be between 1 and 2")
 
 
 @dataclass(slots=True)
@@ -66,7 +69,7 @@ RepairAgent = Callable[
     Awaitable[RepairOutcome | None],
 ]
 IndependentVerifier = Callable[
-    [PreparationContext, list[CheckResult], CheckResult | None],
+    [PreparationContext, list[CheckResult]],
     Awaitable[VerifierResult],
 ]
 SourceVerifier = Callable[[PreparationContext], Awaitable[bool]]
@@ -187,34 +190,6 @@ async def run_command(
         output=output.decode(errors="replace")[-20000:],
         required=command.required,
     )
-
-
-def _apply_edits(workspace: Path, candidate: FixCandidateV1) -> None:
-    by_file: dict[str, list[tuple[int, int, str, str]]] = {}
-    for edit in candidate.draft_edits:
-        by_file.setdefault(edit.file, []).append(
-            (edit.start_line, edit.end_line, edit.before, edit.after)
-        )
-
-    workspace_resolved = workspace.resolve()
-    for file_path, edits in by_file.items():
-        path = (workspace / file_path).resolve()
-        if not path.is_relative_to(workspace_resolved):
-            raise ValueError(f"Draft edit path escapes the workspace: {file_path}")
-        content = path.read_text(encoding="utf-8")
-        lines = content.splitlines(keepends=True)
-        newline = "\r\n" if "\r\n" in content else "\n"
-        for start, end, before, after in sorted(edits, reverse=True):
-            original_segment = "".join(lines[start - 1 : end])
-            actual = original_segment.rstrip("\r\n")
-            if actual != before.rstrip("\r\n"):
-                raise ValueError(f"Draft edit source changed at {file_path}:{start}-{end}")
-            replacement = after.splitlines(keepends=True)
-            preserve_newline = original_segment.endswith(("\n", "\r")) or end < len(lines)
-            if replacement and not replacement[-1].endswith(("\n", "\r")) and preserve_newline:
-                replacement[-1] += newline
-            lines[start - 1 : end] = replacement
-        path.write_text("".join(lines), encoding="utf-8", newline="")
 
 
 async def build_git_manifest(
@@ -368,6 +343,7 @@ def _result(
     diff_summary: str = "",
     artifact_ref: str | None = None,
     attempt_history: list[FixPreparationAttempt] | None = None,
+    blocker: PreparationBlocker | None = None,
 ) -> FixPreparationResultV1:
     return FixPreparationResultV1(
         state=state,
@@ -384,6 +360,7 @@ def _result(
         verifier=verifier,
         attempt_history=attempt_history or [],
         gaps=gaps or [],
+        blocker=blocker,
         attempts=context.attempt,
         elapsed_seconds=time.monotonic() - started,
     )
@@ -405,23 +382,23 @@ def _required_checks_pass(checks: list[CheckResult]) -> bool:
 
 def _verification_passes(
     checks: list[CheckResult],
-    reproduction: CheckResult | None,
     verifier: VerifierResult,
 ) -> bool:
     return (
         _required_checks_pass(checks)
-        and reproduction is not None
-        and reproduction.status is CheckStatus.PASSED
         and verifier.decision is VerificationDecision.VERIFIED
         and verifier.security_invariant_closed
         and verifier.reproduction_executed
+        and any(
+            result.target is VerificationTarget.PATCHED and result.status is CheckStatus.PASSED
+            for result in verifier.security_tests
+        )
     )
 
 
 def _verification_gaps(
     repair_outcome: RepairOutcome,
     checks: list[CheckResult],
-    reproduction: CheckResult | None,
     verifier: VerifierResult,
 ) -> list[str]:
     gaps = list(repair_outcome.gaps)
@@ -438,56 +415,19 @@ def _verification_gaps(
         for result in checks
         if not result.required and result.status is not CheckStatus.PASSED
     )
-    if reproduction is None:
-        gaps.append("No executable security reproduction was available.")
-    elif reproduction.status is not CheckStatus.PASSED:
-        gaps.append(f"{reproduction.name}: security reproduction {reproduction.status}")
+    if not verifier.security_tests:
+        gaps.append("The independent verifier did not execute a security test.")
+    elif not any(
+        result.target is VerificationTarget.PATCHED and result.status is CheckStatus.PASSED
+        for result in verifier.security_tests
+    ):
+        gaps.append("The independent verifier did not pass a security test on the patch.")
+    if not verifier.reproduction_executed:
+        gaps.append("The independent verifier did not execute the security reproduction.")
+    if not verifier.security_invariant_closed:
+        gaps.append("The independent verifier did not prove the security invariant.")
     gaps.extend(verifier.gaps)
     return list(dict.fromkeys(gaps))
-
-
-def _verification_fingerprint(
-    repair_outcome: RepairOutcome,
-    checks: list[CheckResult],
-    reproduction: CheckResult | None,
-    verifier: VerifierResult,
-) -> str:
-    payload = {
-        "repair": {
-            "status": repair_outcome.status,
-            "gaps": repair_outcome.gaps,
-        },
-        "checks": [
-            {
-                "name": result.name,
-                "argv": result.argv,
-                "status": result.status,
-                "exit_code": result.exit_code,
-                "output": result.output,
-                "required": result.required,
-            }
-            for result in checks
-        ],
-        "reproduction": (
-            {
-                "name": reproduction.name,
-                "argv": reproduction.argv,
-                "status": reproduction.status,
-                "exit_code": reproduction.exit_code,
-                "output": reproduction.output,
-            }
-            if reproduction is not None
-            else None
-        ),
-        "verifier": {
-            "decision": verifier.decision,
-            "security_invariant_closed": verifier.security_invariant_closed,
-            "reproduction_executed": verifier.reproduction_executed,
-            "gaps": verifier.gaps,
-        },
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 async def prepare_fix(  # noqa: PLR0915
@@ -516,139 +456,237 @@ async def prepare_fix(  # noqa: PLR0915
             network_allowed=request.network_allowed,
         )
 
-    async def execute() -> FixPreparationResultV1:  # noqa: PLR0911
+    async def execute() -> FixPreparationResultV1:  # noqa: PLR0911, PLR0912, PLR0915
         if cancelled():
             raise PreparationCancelledError
         if not await source_verifier(context):
+            blocker = PreparationBlocker(
+                kind=BlockerKind.SOURCE,
+                summary="The repository no longer matches the finding source.",
+                user_action="Refresh the finding against the current repository revision.",
+            )
             return _result(
                 context,
                 state=PreparationState.STALE,
-                reason="The workspace does not match the recorded source identity.",
+                reason=blocker.summary,
+                blocker=blocker,
                 started=started,
             )
 
-        anchored, anchors = anchor_candidate(workspace, context.candidate)
-        edit_results = anchors[len(context.candidate.finding_locations) :]
-        if any(result.status is AnchorStatus.STALE for result in edit_results):
-            return _result(
-                context,
-                state=PreparationState.STALE,
-                reason="A draft edit does not match the recorded source.",
-                started=started,
-            )
+        anchors = [
+            anchor_location(workspace, location) for location in context.candidate.finding_locations
+        ]
         if any(result.status is not AnchorStatus.UNIQUE for result in anchors):
-            gaps = [
+            details = [
                 f"{result.location.file}: {result.status}"
                 for result in anchors
                 if result.status is not AnchorStatus.UNIQUE
             ]
+            blocker = PreparationBlocker(
+                kind=BlockerKind.SOURCE,
+                summary="The reported finding locations could not be resolved uniquely.",
+                user_action="Refresh the finding or identify the affected source location.",
+                details=details,
+            )
             return _result(
                 context,
-                state=PreparationState.NEEDS_REVIEW,
-                reason="One or more candidate locations could not be anchored uniquely.",
-                gaps=gaps,
+                state=PreparationState.BLOCKED,
+                reason=blocker.summary,
+                gaps=details,
+                blocker=blocker,
                 started=started,
             )
-        context.candidate = anchored
-        _apply_edits(workspace, context.candidate)
+        context.candidate = context.candidate.model_copy(
+            update={"finding_locations": [result.location for result in anchors]}
+        )
 
         checks: list[CheckResult] = []
-        reproduction: CheckResult | None = None
         verifier: VerifierResult | None = None
         attempt_history: list[FixPreparationAttempt] = []
-        previous_workspace_digest: str | None = None
-        previous_verification_fingerprint: str | None = None
-        reproduction_command = (
-            context.candidate.reproduction.command
-            if context.candidate.reproduction is not None
-            else None
-        )
         for attempt in range(1, resolved_policy.max_repair_attempts + 1):
             context.attempt = attempt
             if cancelled():
                 raise PreparationCancelledError
             repair_outcome = _repair_outcome(await repair(context, checks))
-            if repair_outcome.reproduction_command is not None:
-                reproduction_command = repair_outcome.reproduction_command
+
+            if repair_outcome.status is RepairStatus.BLOCKED:
+                manifest, summary, artifact_ref = await manifest_builder(workspace)
+                blocker = repair_outcome.blocker or PreparationBlocker(
+                    kind=BlockerKind.EXTERNAL_CONFIGURATION,
+                    summary=repair_outcome.summary,
+                    user_action=(
+                        "Provide the missing repository, credential, or production "
+                        "configuration prerequisite."
+                    ),
+                    details=repair_outcome.gaps,
+                )
+                return _result(
+                    context,
+                    state=PreparationState.BLOCKED,
+                    reason=blocker.summary,
+                    gaps=repair_outcome.gaps,
+                    manifest=manifest,
+                    diff_summary=summary,
+                    artifact_ref=artifact_ref,
+                    attempt_history=attempt_history,
+                    blocker=blocker,
+                    started=started,
+                )
+
+            if repair_outcome.status is not RepairStatus.COMPLETE:
+                manifest, summary, artifact_ref = await manifest_builder(workspace)
+                return _result(
+                    context,
+                    state=PreparationState.FAILED,
+                    reason=repair_outcome.summary,
+                    gaps=repair_outcome.gaps,
+                    manifest=manifest,
+                    diff_summary=summary,
+                    artifact_ref=artifact_ref,
+                    attempt_history=attempt_history,
+                    started=started,
+                )
+
             checks = [await runner(workspace, check) for check in request.checks]
-            reproduction = (
-                await runner(workspace, reproduction_command)
-                if reproduction_command is not None
-                else None
-            )
-            verifier = await verify(context, checks, reproduction)
             workspace_digest = await _workspace_digest(workspace)
             attempt_record = FixPreparationAttempt(
                 attempt=attempt,
                 repair=repair_outcome,
                 checks=checks,
-                security_reproduction=reproduction,
-                verifier=verifier,
                 workspace_digest=workspace_digest,
             )
             attempt_history.append(attempt_record)
             context.feedback = list(attempt_history)
-            gaps = _verification_gaps(repair_outcome, checks, reproduction, verifier)
-            gaps = list(dict.fromkeys(gaps))
-            verification_fingerprint = _verification_fingerprint(
-                repair_outcome,
-                checks,
-                reproduction,
-                verifier,
-            )
 
-            if repair_outcome.status is RepairStatus.BLOCKED:
+            required = [result for result in checks if result.required]
+            unavailable = [
+                result for result in required if result.status is CheckStatus.UNAVAILABLE
+            ]
+            if not required or unavailable:
+                details = (
+                    ["No required repository quality check was configured."]
+                    if not required
+                    else [f"{result.name}: {result.output}" for result in unavailable]
+                )
+                blocker = PreparationBlocker(
+                    kind=BlockerKind.ENVIRONMENT,
+                    summary="The repository quality gate could not run.",
+                    user_action=(
+                        "Provide the missing tool or repository setup needed to run "
+                        "the required checks."
+                    ),
+                    details=details,
+                )
                 manifest, summary, artifact_ref = await manifest_builder(workspace)
                 return _result(
                     context,
                     state=PreparationState.BLOCKED,
-                    reason=repair_outcome.summary,
+                    reason=blocker.summary,
                     checks=checks,
-                    reproduction=reproduction,
+                    gaps=blocker.details,
+                    manifest=manifest,
+                    diff_summary=summary,
+                    artifact_ref=artifact_ref,
+                    attempt_history=attempt_history,
+                    blocker=blocker,
+                    started=started,
+                )
+
+            failed = [result for result in required if result.status is CheckStatus.FAILED]
+            baseline_failures = [
+                result for result in failed if result.baseline_status is CheckStatus.FAILED
+            ]
+            if baseline_failures:
+                blocker = PreparationBlocker(
+                    kind=BlockerKind.REPOSITORY_BASELINE,
+                    summary="Required checks also fail on the unchanged repository.",
+                    user_action=(
+                        "Repair the repository baseline or identify authoritative "
+                        "replacement checks."
+                    ),
+                    details=[result.name for result in baseline_failures],
+                )
+                manifest, summary, artifact_ref = await manifest_builder(workspace)
+                return _result(
+                    context,
+                    state=PreparationState.BLOCKED,
+                    reason=blocker.summary,
+                    checks=checks,
+                    gaps=blocker.details,
+                    manifest=manifest,
+                    diff_summary=summary,
+                    artifact_ref=artifact_ref,
+                    attempt_history=attempt_history,
+                    blocker=blocker,
+                    started=started,
+                )
+            if failed:
+                if attempt < resolved_policy.max_repair_attempts:
+                    continue
+                manifest, summary, artifact_ref = await manifest_builder(workspace)
+                return _result(
+                    context,
+                    state=PreparationState.FAILED,
+                    reason="The repair did not pass the repository quality gate.",
+                    checks=checks,
+                    gaps=[f"{result.name}: {result.output}" for result in failed],
+                    manifest=manifest,
+                    diff_summary=summary,
+                    artifact_ref=artifact_ref,
+                    attempt_history=attempt_history,
+                    started=started,
+                )
+
+            verifier = await verify(context, checks)
+            attempt_record.verifier = verifier
+            attempt_record.security_reproduction = next(
+                (
+                    result
+                    for result in verifier.security_tests
+                    if result.target is VerificationTarget.PATCHED
+                ),
+                None,
+            )
+            context.feedback = list(attempt_history)
+            gaps = _verification_gaps(repair_outcome, checks, verifier)
+
+            if verifier.blocker is not None:
+                manifest, summary, artifact_ref = await manifest_builder(workspace)
+                return _result(
+                    context,
+                    state=PreparationState.BLOCKED,
+                    reason=verifier.blocker.summary,
+                    checks=checks,
+                    reproduction=attempt_record.security_reproduction,
                     verifier=verifier,
                     gaps=gaps,
                     manifest=manifest,
                     diff_summary=summary,
                     artifact_ref=artifact_ref,
                     attempt_history=attempt_history,
+                    blocker=verifier.blocker,
                     started=started,
                 )
 
-            if _verification_passes(checks, reproduction, verifier):
+            if _verification_passes(checks, verifier):
                 manifest, summary, artifact_ref = await manifest_builder(workspace)
                 if not manifest:
                     return _result(
                         context,
-                        state=PreparationState.NEEDS_REVIEW,
-                        reason="The prepared workspace does not contain a source change.",
+                        state=PreparationState.FAILED,
+                        reason="The repair did not change repository source.",
                         checks=checks,
-                        reproduction=reproduction,
                         verifier=verifier,
-                        gaps=[*gaps, "No prepared source change was produced."],
-                        attempt_history=attempt_history,
-                        started=started,
-                    )
-                if gaps:
-                    return _result(
-                        context,
-                        state=PreparationState.READY_WITH_GAPS,
-                        reason=("The fix passed available checks, but verification gaps remain."),
-                        checks=checks,
-                        reproduction=reproduction,
-                        verifier=verifier,
-                        gaps=gaps,
-                        manifest=manifest,
-                        diff_summary=summary,
-                        artifact_ref=artifact_ref,
+                        gaps=["No prepared source change was produced."],
                         attempt_history=attempt_history,
                         started=started,
                     )
                 return _result(
                     context,
                     state=PreparationState.READY,
-                    reason="The fix passed required checks and independent verification.",
+                    reason="The fix passed repository checks and security verification.",
                     checks=checks,
-                    reproduction=reproduction,
+                    reproduction=attempt_record.security_reproduction,
                     verifier=verifier,
                     manifest=manifest,
                     diff_summary=summary,
@@ -657,46 +695,32 @@ async def prepare_fix(  # noqa: PLR0915
                     started=started,
                 )
 
-            if (
-                previous_workspace_digest == workspace_digest
-                and previous_verification_fingerprint == verification_fingerprint
-                and verifier.decision is not VerificationDecision.INCONCLUSIVE
-            ):
-                manifest, summary, artifact_ref = await manifest_builder(workspace)
-                return _result(
-                    context,
-                    state=PreparationState.NEEDS_REVIEW,
-                    reason="The repair made no repository progress after verification feedback.",
-                    checks=checks,
-                    reproduction=reproduction,
-                    verifier=verifier,
-                    gaps=[*gaps, "Two repair cycles produced the same repository state."],
-                    manifest=manifest,
-                    diff_summary=summary,
-                    artifact_ref=artifact_ref,
-                    attempt_history=attempt_history,
-                    started=started,
-                )
-            previous_workspace_digest = workspace_digest
-            previous_verification_fingerprint = verification_fingerprint
+            if verifier.repairable and attempt < resolved_policy.max_repair_attempts:
+                continue
 
-        assert verifier is not None
+            manifest, summary, artifact_ref = await manifest_builder(workspace)
+            return _result(
+                context,
+                state=PreparationState.FAILED,
+                reason="The independent security verifier did not approve the repair.",
+                checks=checks,
+                reproduction=attempt_record.security_reproduction,
+                verifier=verifier,
+                gaps=gaps,
+                manifest=manifest,
+                diff_summary=summary,
+                artifact_ref=artifact_ref,
+                attempt_history=attempt_history,
+                started=started,
+            )
+
         manifest, summary, artifact_ref = await manifest_builder(workspace)
         return _result(
             context,
-            state=PreparationState.NEEDS_REVIEW,
-            reason="The fix did not satisfy verification within the repair cycle limit.",
+            state=PreparationState.FAILED,
+            reason="The repair did not satisfy the required gates.",
             checks=checks,
-            reproduction=reproduction,
             verifier=verifier,
-            gaps=[
-                *_verification_gaps(
-                    attempt_history[-1].repair,
-                    checks,
-                    reproduction,
-                    verifier,
-                ),
-            ],
             manifest=manifest,
             diff_summary=summary,
             artifact_ref=artifact_ref,
