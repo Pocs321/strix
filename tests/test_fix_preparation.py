@@ -515,6 +515,44 @@ async def test_prepare_fix_retries_when_unchanged_state_has_new_feedback(
 
 
 @pytest.mark.asyncio
+async def test_prepare_fix_retries_transient_inconclusive_verification(
+    tmp_path: Path,
+) -> None:
+    workspace, commit = _workspace(tmp_path)
+    verifier_calls = 0
+
+    async def verify(
+        context: PreparationContext,
+        checks: list[CheckResult],
+        reproduction: CheckResult | None,
+    ) -> VerifierResult:
+        nonlocal verifier_calls
+        verifier_calls += 1
+        if verifier_calls < 3:
+            return VerifierResult(
+                decision=VerificationDecision.INCONCLUSIVE,
+                summary="The independent verifier reached its turn limit.",
+                gaps=["Independent verification did not complete within 30 turns."],
+            )
+        return await _verified(context, checks, reproduction)
+
+    result = await prepare_fix(
+        _request(_candidate(commit), attempts=4),
+        workspace,
+        repair=_noop_repair,
+        verify=verify,
+    )
+
+    assert result.state is PreparationState.READY
+    assert result.attempts == 3
+    assert [attempt.verifier.decision for attempt in result.attempt_history] == [
+        VerificationDecision.INCONCLUSIVE,
+        VerificationDecision.INCONCLUSIVE,
+        VerificationDecision.VERIFIED,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_fix_evaluates_budget_exhausted_patch(tmp_path: Path) -> None:
     workspace, commit = _workspace(tmp_path)
 

@@ -660,6 +660,7 @@ async def prepare_fix(  # noqa: PLR0915
             if (
                 previous_workspace_digest == workspace_digest
                 and previous_verification_fingerprint == verification_fingerprint
+                and verifier.decision is not VerificationDecision.INCONCLUSIVE
             ):
                 manifest, summary, artifact_ref = await manifest_builder(workspace)
                 return _result(
