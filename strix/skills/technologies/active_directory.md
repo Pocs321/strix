@@ -100,6 +100,13 @@ certipy find -u <USER>@<DOMAIN> -p <PASS> -dc-ip <DC_IP> -vulnerable -stdout
 - **ESC8** — NTLM relay to the CA web-enrollment endpoint (coerce a DC, relay to `/certsrv`) → DC certificate → DCSync.
 - **ESC others** — ESC2/3 (any-purpose/enrollment-agent), ESC4 (writable template DACL → make it ESC1), ESC6 (`EDITF_ATTRIBUTESUBJECTALTNAME2` on the CA), ESC7 (CA officer rights), ESC9/10 (weak cert mapping), ESC11 (RPC relay), ESC13 (issuance-policy→group), ESC15 (app-policy on v1 templates). `certipy find -vulnerable` flags each.
 
+**Strong certificate mapping:** DCs with the September 9, 2025 update or later enforce strong certificate mapping without Compatibility-mode fallback. Inspect the issuing template's SID extension, explicit mappings, KDC patch level, and the actual principal selected at authentication. A requested privileged UPN alone does not establish a working ESC chain on a fully updated domain ([KB5014754](https://support.microsoft.com/en-us/servicing/os/windows-server/2022/05/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers)).
+
+### Windows Server 2025 dMSA / BadSuccessor
+
+- **CVE-2025-53779:** on unpatched Server 2025 DCs, control sufficient to create/modify a delegated Managed Service Account can establish a one-way migration link to another principal and obtain its authority/keys through the KDC. Enumerate dMSA creation rights, object ACLs, and migration attributes rather than limiting discovery to conventional service accounts and delegation flags.
+- **Patched behavior:** the KDC requires mutual dMSA↔target linkage. Writing the dMSA-side attribute still succeeds, so LDAP write success is not proof of exploitation. Determine whether the tester also controls the target object's reciprocal link and whether the KDC actually issues the relevant ticket. Post-patch abuse is a different prerequisite chain from the original low-privilege OU-control escalation ([researchers' patch analysis](https://www.akamai.com/blog/security-research/badsuccessor-is-dead-analyzing-badsuccessor-patch)).
+
 ### NTLM Coercion & Relay
 
 Force a privileged machine to authenticate to you, then relay that NTLM auth to a service that doesn't enforce signing/EPA (LDAP, AD CS, SMB).

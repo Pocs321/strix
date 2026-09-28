@@ -148,6 +148,10 @@ Improper file path handling and dynamic inclusion enable sensitive file disclosu
 - Verify symlink handling and path canonicalization prior to write
 - Impact: overwrite config/templates or drop webshells into served directories
 
+**Python extraction filters:** Python 3.14 defaults `tarfile` extraction to the `data` filter; inspect explicit `filter`, `TarFile.extraction_filter`, and runtime patch level rather than assuming `extractall()` is unfiltered. Filters were backported to earlier branches but their defaults differ ([Python documentation](https://docs.python.org/3/library/tarfile.html#extraction-filters)).
+
+`data`/`tar` extraction filters require patched link handling to prevent CVE-2024-12718 and CVE-2025-4138/4330/4435/4517 ([3.12.11 security fixes](https://www.python.org/downloads/release/python-31211/)). **CVE-2026-82049** affects CPython 3.13 and earlier: hard links to symlinks can expose outside-file contents inside the extraction tree or modify outside-file permissions/timestamps despite those filters. Test archive link ordering and post-extraction reads in an isolated directory; distinguish content disclosure/metadata modification from arbitrary content overwrite. Check branch-specific patches in the [Python security announcement](https://mail.python.org/archives/list/security-announce@python.org/thread/EFJWGAZJA56AKSBR2WHMHQZO7RRLZPRH/).
+
 ### File Write to Execution
 
 Characterize the write primitive before choosing a payload:

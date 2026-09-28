@@ -104,6 +104,12 @@ Prove the strongest reliable capability first. If escalation requires a user ges
 - Treat scriptless disclosure of a nonce or trusted URL as a primitive; prove a second controllable sink before claiming bypass.
 - For response splitting, consider whether a same-origin endpoint can be turned into a script resource with a controlled body length or framing.
 
+### Local Network and Loopback Access
+
+Chrome 142+ applies Local Network Access permission checks for covered requests from websites to local destinations; secure-context, request type, permission state, and enterprise policy affect reachability. Test DNS rebinding and browser-to-local-service chains in the target browser, including permission denied and granted states. A successful server-side request does not establish browser reachability ([Chrome LNA](https://developer.chrome.com/blog/local-network-access)).
+
+Chrome 145+ uses separate permissions for `local-network` and `loopback-network`; `local-network-access` is an alias for permission queries and Permissions Policy. Record which destination class was permitted before claiming access to both LAN and localhost services ([Chrome 145](https://developer.chrome.com/release-notes/145#local_network_access_split_permissions)).
+
 ### JavaScript Gadget Discovery
 
 - When direct calls are blocked, inspect implicit coercions (`toString`, `valueOf`, iterators, getters, proxies) and callbacks invoked by accessible library functions.

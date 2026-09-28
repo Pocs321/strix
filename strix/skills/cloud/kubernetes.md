@@ -32,6 +32,11 @@ Kubernetes clusters expose a large attack surface through their API server, kube
 
 ## Key Vulnerabilities
 
+### Ingress-NGINX Admission and Retirement
+
+- **IngressNightmare / CVE-2025-1974:** admission-controller reachability is a separate surface from public ingress routes. The exploit chain can reach controller execution and its Kubernetes credential authority from the pod network without a Kubernetes account. Inventory the validating webhook endpoint, controller image, network access, and service-account permissions. The admission-controller vulnerabilities are fixed in ingress-nginx 1.11.5 / 1.12.1; match the installed branch ([Kubernetes advisory](https://kubernetes.io/blog/2025/03/24/ingress-nginx-cve-2025-1974/)).
+- **Unsupported controller:** community ingress-nginx has received no upstream security fixes since its March 2026 retirement. A deployment patched for IngressNightmare can still be running an unsupported controller. Identify the controller implementation precisely: this retirement does not describe every NGINX-branded controller or the Kubernetes Ingress API. Assess migration to a maintained controller/Gateway API separately from exploitation of a specific CVE ([retirement statement](https://kubernetes.io/blog/2026/01/29/ingress-nginx-statement/)).
+
 ### RBAC Misconfigurations
 
 - Wildcard verbs or resources in ClusterRole/Role bindings: `verbs: ["*"]`, `resources: ["*"]`

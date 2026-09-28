@@ -78,6 +78,13 @@ For each controller and method, identify:
 
 ## Key Vulnerabilities
 
+### Adapter and Schema Version Boundaries
+
+- **Nest 11 / Express 5:** the default query parser is simple. Bracketed query fields do not automatically become nested objects; identify any `query parser: extended` override before applying `qs`/nested-operator attacks. Wildcard matchers distinguish root and child paths; test both paths against authentication middleware ([Express 5 migration](https://nestjs.io/tutorials/what-s-new-in-express-5-eeb51579)).
+- **Fastify 5:** route validation requires full JSON schemas; shorthand schemas are unsupported. Check the adapter and custom validator configuration before assuming that a DTO or legacy route schema is enforced ([Fastify migration](https://fastify.dev/docs/v5.0.x/Guides/Migration-Guide-V5/)).
+- **Nest 12 Standard Schema:** `@Body({ schema })`, `@Query({ schema })`, `@Param(..., { schema })`, and `@RawBody({ schema })` attach metadata; enforcement requires `StandardSchemaValidationPipe`. Probe schema-decorated routes for accepted invalid values when the pipe is absent or transport-local. Outgoing schema enforcement uses `StandardSchemaSerializerInterceptor`; check actual output rather than relying only on class-transformer decorators.
+- **Nest 12 GraphQL:** use GraphiQL and `graphql-ws`; `subscriptions-transport-ws` is unsupported by the corresponding `@nestjs/graphql` release. Discover the negotiated subprotocol and recheck connection and per-operation authentication on the deployed transport ([Nest 12 migration](https://docs.nestjs.com/migration-guide)).
+
 ### Guard Bypass
 
 **Decorator Stack Gaps**
