@@ -421,6 +421,48 @@ async def test_repository_baseline_failure_is_a_typed_blocker(
 
 
 @pytest.mark.asyncio
+async def test_different_candidate_and_baseline_failures_are_repairable(
+    tmp_path: Path,
+) -> None:
+    workspace, commit = _workspace(tmp_path)
+    repairs = 0
+
+    async def repair(
+        _context: PreparationContext,
+        _feedback: list[CheckResult],
+    ) -> RepairOutcome:
+        nonlocal repairs
+        repairs += 1
+        return await _noop_repair(_context, _feedback)
+
+    async def runner(_workspace: Path, command: CommandSpec) -> CheckResult:
+        return CheckResult(
+            name=command.name,
+            argv=command.argv,
+            status=CheckStatus.FAILED,
+            exit_code=1,
+            duration_seconds=0,
+            output="candidate-specific failure",
+            required=command.required,
+            baseline_status=CheckStatus.FAILED,
+            baseline_output="different pre-existing failure",
+        )
+
+    result = await prepare_fix(
+        _request(_candidate(commit)),
+        workspace,
+        repair=repair,
+        verify=_verified,
+        command_runner=runner,
+    )
+
+    assert result.state is PreparationState.FAILED
+    assert result.blocker is None
+    assert result.attempts == 2
+    assert repairs == 2
+
+
+@pytest.mark.asyncio
 async def test_unavailable_required_check_is_a_typed_blocker(tmp_path: Path) -> None:
     workspace, commit = _workspace(tmp_path)
 

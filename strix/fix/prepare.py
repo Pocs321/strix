@@ -430,6 +430,14 @@ def _verification_gaps(
     return list(dict.fromkeys(gaps))
 
 
+def _matches_baseline_failure(result: CheckResult) -> bool:
+    if result.baseline_status is not CheckStatus.FAILED:
+        return False
+    candidate_output = " ".join(result.output.split())
+    baseline_output = " ".join((result.baseline_output or "").split())
+    return bool(candidate_output and candidate_output == baseline_output)
+
+
 async def prepare_fix(  # noqa: PLR0915
     request: FixPreparationRequestV1,
     workspace: Path,
@@ -593,9 +601,7 @@ async def prepare_fix(  # noqa: PLR0915
                 )
 
             failed = [result for result in required if result.status is CheckStatus.FAILED]
-            baseline_failures = [
-                result for result in failed if result.baseline_status is CheckStatus.FAILED
-            ]
+            baseline_failures = [result for result in failed if _matches_baseline_failure(result)]
             if baseline_failures:
                 blocker = PreparationBlocker(
                     kind=BlockerKind.REPOSITORY_BASELINE,
