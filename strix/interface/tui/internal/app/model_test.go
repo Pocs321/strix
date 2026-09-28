@@ -1439,3 +1439,31 @@ func TestNarrowTerminalKeepsTheFrameIntact(t *testing.T) {
 		}
 	}
 }
+
+func TestCtrlZSuspendsFromEveryScreen(t *testing.T) {
+	for name, prepare := range map[string]func(*Model){
+		"splash": func(m *Model) { m.showSplash = true },
+		"modal":  func(m *Model) { m.showSplash = false; m.openModal(modalHelp) },
+		"main":   func(m *Model) { m.showSplash = false },
+	} {
+		model := New(nil)
+		prepare(&model)
+		_, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlZ})
+		if cmd == nil {
+			t.Fatalf("%s: ctrl+z returned no command", name)
+		}
+		if _, ok := cmd().(tea.SuspendMsg); !ok {
+			t.Fatalf("%s: ctrl+z did not suspend", name)
+		}
+	}
+}
+
+func TestResumeReenablesMouse(t *testing.T) {
+	_, cmd := New(nil).Update(tea.ResumeMsg{})
+	if cmd == nil {
+		t.Fatal("resume returned no command")
+	}
+	if msg := cmd(); msg != tea.EnableMouseCellMotion() {
+		t.Fatalf("resume did not re-enable mouse tracking: %#v", msg)
+	}
+}
