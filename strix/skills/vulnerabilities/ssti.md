@@ -76,7 +76,7 @@ When output isn't reflected:
 
 ### Jinja2 / Mako (Python)
 
-**Jinja sandbox patch boundaries:** CVE-2024-56326 covers indirect `str.format` calls through stored references/custom filters (fixed in 3.1.5); CVE-2025-27516 covers `|attr` retrieving the plain format method outside sandbox attribute checks (fixed in 3.1.6). Inventory the exact Jinja version, environment, custom filters, and attacker control over template source. A patched sandbox changes which gadget paths work; user data passed only as a template variable does not expose this source-control prerequisite ([Jinja release notes](https://jinja.palletsprojects.com/en/stable/changes/), [attr advisory](https://github.com/pallets/jinja/security/advisories/GHSA-cpwx-vrp4-4pq7)).
+**Jinja sandbox:** indirect `str.format` references and `|attr` require version-specific checks; their sandbox fixes are in 3.1.5 and 3.1.6 respectively. Establish template-source control and inspect custom filters before choosing gadgets; user data passed only as a variable is a different surface ([release notes](https://jinja.palletsprojects.com/en/stable/changes/)).
 
 The classic Python class walk — every object exposes its method-resolution-order, which leads to `object`, which exposes every subclass loaded in the interpreter, which includes things like `subprocess.Popen`:
 

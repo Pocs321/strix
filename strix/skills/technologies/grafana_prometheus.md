@@ -79,13 +79,10 @@ Unauthenticated view (and, with `public_mode`, delete) of the lowest-key snapsho
 ### Prometheus / Alertmanager — exposure is the vuln (no auth by default)
 Prometheus and Alertmanager ship with **no authentication**; the docs explicitly say do not expose them. There is rarely a CVE — reachability itself is the finding, and the payoff is recon + credential leakage + pivoting (below).
 
-## Authentication, Plugin, and MCP Paths
+## Plugin and MCP Boundaries
 
-- **CVE-2026-12704 — Enterprise SAML replay:** with `allow_idp_initiated` enabled, `InResponseTo` validation is skipped even for SP-initiated responses. Test replay/session binding with a signed assertion for a controlled account. The setting is off by default; OSS is excluded. Fixed branches include 12.4.11 / 13.0.8 / 13.1.5 / 13.2.1 ([advisory](https://grafana.com/security/security-advisories/cve-2026-12704/)).
-- **CVE-2026-14199 — Auth Proxy identity collision:** self-managed Auth Proxy with `sync_ttl > 0` concatenates username and forwarded attributes without separators. Test whether two controlled identities produce the same cache key while an entry is live; attacker control of the relevant attributes is required. Fixed branches include 12.4.10 / 13.0.8 / 13.1.5 / 13.2.1 ([advisory](https://grafana.com/security/security-advisories/cve-2026-14199/)).
-- **CVE-2026-15815 — plugin extraction:** chained relative symlinks in a plugin archive can write outside the plugin directory and place an executable backend binary. Extraction occurs before signature verification, so signature checks alone do not block the write. Trace archive origin through CLI, `GF_INSTALL_PLUGINS`, or preinstall configuration; installing the archive is the necessary trigger. Fixed in 12.4.11 / 13.0.9 / 13.1.6 / 13.2.2 ([advisory](https://grafana.com/security/security-advisories/cve-2026-15815/)).
-- **CVE-2026-76154 — Geomap/MapLibre stored XSS:** an Editor-controlled external style configuration can execute script in a dashboard viewer's session, including an Org Admin. Follow the style URL and rendering path rather than testing only panel text. Fixed branches include 12.4.11 / 13.0.9 / 13.1.6 / 13.2.2 ([advisory](https://grafana.com/security/security-advisories/cve-2026-76154/)).
-- **CVE-2026-19516 — MCP Grafana SSRF:** a caller of `grafana_api_request` can steer destination, method, path, and body through `X-Grafana-URL`. The earlier CVE-2026-15583 fix stopped token forwarding but left destination control exploitable. Test destination restrictions independently of credential leakage. Fixed in mcp-grafana 1.1.0; the MCP server version is separate from Grafana's version ([advisory](https://grafana.com/security/security-advisories/cve-2026-19516/)).
+- Plugin archives are extracted before signature verification. Test chained symlinks and containment before trusting a signature failure to prevent filesystem writes; archive installation is the required trigger ([extraction advisory](https://grafana.com/security/security-advisories/cve-2026-15815/)).
+- Inventory mcp-grafana separately from Grafana. Trace `grafana_api_request` and `X-Grafana-URL` into destination selection; preventing token forwarding alone does not prevent SSRF ([MCP advisory](https://grafana.com/security/security-advisories/cve-2026-19516/)).
 
 ## Pivoting: Observability → Deeper Compromise
 

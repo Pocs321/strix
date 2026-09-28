@@ -83,30 +83,10 @@ Inspect Network tab for POST requests with `Next-Action` header. Extract action 
 
 ## Key Vulnerabilities
 
-### RSC Deserialization, Source Disclosure, and DoS
+### RSC and Image Processing
 
-- **React2Shell — CVE-2025-55182 / Next.js CVE-2025-66478:** unauthenticated RCE in the RSC request decoder. An App Router application can expose the vulnerable decoder even without explicitly declared Server Actions. Inventory the bundled `react-server-dom-*` implementation, not just the top-level React version; client-only React and Pages-only applications are different surfaces. Trace an incoming Flight/Server Function request to the decoder and distinguish decoding from invocation of an application action. See [React advisory](https://react.dev/blog/2025/12/03/critical-security-vulnerability-in-react-server-components).
-- **Incomplete patch chains:** CVE-2025-55183 concerns Server Function source disclosure; CVE-2025-55184, CVE-2025-67779, and CVE-2026-23864 concern DoS. Source disclosure can reveal constants embedded in a function, but does not automatically disclose runtime environment variables. These issues are fixed in RSC packages 19.0.4 / 19.1.5 / 19.2.4; versions 19.0.3 / 19.1.4 / 19.2.3 remain affected by incomplete fixes. These version floors cover only this CVE family. Check Next.js advisories for the framework's affected and patched branches ([RSC advisory](https://react.dev/blog/2025/12/11/denial-of-service-and-source-code-exposure-in-react-server-components)).
-
-### Proxy, Action, and Cache Attack Paths
-
-The following issues are fixed in Next.js 15.5.21 / 16.2.11 and stable 16.3.0 ([advisories](https://nextjs.org/blog/july-2026-security-release)). Match the individual advisory's affected range to the deployed build.
-
-| Issue | Required surface and test direction |
-|---|---|
-| CVE-2026-64642 | App Router + Turbopack + exactly one `i18n.locales` entry: test middleware/proxy-protected routes. |
-| CVE-2026-64645 | Request-derived external rewrite/redirect hostnames: check whether the intended suffix still constrains the destination. |
-| CVE-2026-64649 | Custom-server Server Actions: trace forwarded/redirected requests and attacker-controlled Host-associated headers. |
-| CVE-2026-64643 | App Router action/`use cache` endpoint-ID disclosure: enumerate the exposed endpoints, then test their authorization separately. |
-| CVE-2026-64648 / 64647 | Cached fetch bodies: compare `fetch(new Request(init), differentInit)` and distinct invalid-UTF-8 bodies for cross-request response reuse. |
-| CVE-2026-64641 / 64646 | Action CPU exhaustion / Edge action-body memory exhaustion: requires a reachable Server Action; assess limits in an isolated worker. |
-| CVE-2026-64644 | Self-hosted default image loader with remote optimization: SVG processing can exhaust CPU. |
-
-### Native Image and Windows RCE
-
-- **AVIF optimizer:** an attacker-controlled AVIF reaching the `sharp`/libheif decoder can trigger unauthenticated RCE. Trace upload or allowed remote-image content into `/_next/image`; URL allowlisting does not make attacker-controlled image bytes trusted. Next.js 15.5.24 / 16.3.3 mitigate this path by disabling AVIF optimization.
-- **CVE-2026-75604:** Windows-hosted applications combining Pages Router and App Router **without Cache Components** have a separate unauthenticated RCE path. Linux/macOS and applications without that router combination are excluded. Fixed in 15.5.24 / 16.3.3 ([Next.js advisories](https://nextjs.org/blog/august-2026-security-release)).
-- **CVE-2026-94545 / GHSA-vcvr-r3jv-pc5j:** Next.js `>=16.2.0 <16.3.6`, Node `next/og` `ImageResponse`, and attacker-controlled SVG content, attributes, or styles. Trace input into image construction rather than testing only `/_next/image`; these are separate pipelines. The Edge implementation is excluded. Patched in 16.3.6 ([ImageResponse advisory](https://github.com/vercel/next.js/security/advisories/GHSA-vcvr-r3jv-pc5j)).
+- **React2Shell (CVE-2025-55182):** App Router applications can expose the vulnerable RSC decoder without explicit Server Actions. Identify the bundled `react-server-dom-*` implementation and trace requests into decoding; client-only React and Pages-only apps have different exposure. Check the framework's patched branch, including source-disclosure and DoS fixes ([RCE advisory](https://react.dev/blog/2025/12/03/critical-security-vulnerability-in-react-server-components), [RSC advisories](https://react.dev/blog/2025/12/11/denial-of-service-and-source-code-exposure-in-react-server-components)).
+- Treat `/_next/image` optimization and Node `next/og` `ImageResponse` as separate input paths. Trace attacker-controlled image bytes into native decoders, and SVG content/attributes/styles into image construction. URL allowlisting does not make image contents trusted; match the decoder, runtime, and Next.js version to the relevant advisory ([optimizer](https://nextjs.org/blog/august-2026-security-release), [ImageResponse](https://github.com/vercel/next.js/security/advisories/GHSA-vcvr-r3jv-pc5j)).
 
 ### Middleware Bypass
 

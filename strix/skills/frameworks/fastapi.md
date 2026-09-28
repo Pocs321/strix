@@ -58,20 +58,11 @@ For each route, identify:
 
 ## Key Vulnerabilities
 
-### Starlette Vulnerabilities
+### Starlette Request Handling
 
-Resolve the installed Starlette version independently of FastAPI and identify the ASGI server and front proxy. The following paths depend on the application using the affected Starlette feature:
+Resolve Starlette's version independently of FastAPI and identify the ASGI server/front proxy. Compare middleware authorization against the actual routed path: malformed Host values can alter reconstructed `request.url` without changing routing ([URL parsing advisory](https://github.com/Kludex/starlette/security/advisories/GHSA-86qp-5c8j-p5mr)).
 
-| Advisory | Affected / fixed Starlette | Attack path |
-|---|---|---|
-| [GHSA-86qp-5c8j-p5mr](https://github.com/Kludex/starlette/security/advisories/GHSA-86qp-5c8j-p5mr) | `<=1.0.0` / 1.0.1 | Malformed Host containing `/`, `?`, or `#` changes reconstructed `request.url.path` while routing still uses the original path. Compare middleware authorization against the actual routed endpoint through the deployed proxy. |
-| [GHSA-jp82-jpqv-5vv3](https://github.com/Kludex/starlette/security/advisories/GHSA-jp82-jpqv-5vv3) | `<1.3.0` / 1.3.0 | A request-target lacking a leading slash can poison `request.url.hostname`. Requires the ASGI server to forward that target; focus on pre-routing middleware and error handlers, since the malformed path normally returns 404. |
-| [GHSA-x746-7m8f-x49c](https://github.com/Kludex/starlette/security/advisories/GHSA-x746-7m8f-x49c) | `<1.1.0` / 1.1.0 | `HTTPEndpoint` registered without explicit `Route(methods=...)` can dispatch nonstandard verbs to matching helper methods. Inventory helpers accepting a request and returning a response; ordinary FastAPI decorators alone do not establish this path. |
-| [GHSA-wqp7-x3pw-xc5r](https://github.com/Kludex/starlette/security/advisories/GHSA-wqp7-x3pw-xc5r) | `<1.1.0` / 1.1.0 | Windows `StaticFiles` with default `follow_symlink=False` resolves UNC paths before containment checks, causing SMB/NTLM exposure even when the HTTP response is 404. Requires Windows and reachable outbound SMB. |
-| [GHSA-82w8-qh3p-5jfq](https://github.com/Kludex/starlette/security/advisories/GHSA-82w8-qh3p-5jfq) | `>=0.4.1 <1.3.1` / 1.3.1 | `request.form()` ignores field-count/part-size limits for URL-encoded bodies. Compare the same small configured limit under URL-encoded and multipart content types; use an isolated worker for resource measurements. |
-| [GHSA-7f5h-v6xp-fcq8](https://github.com/Kludex/starlette/security/advisories/GHSA-7f5h-v6xp-fcq8) | `>=0.39.0 <=0.49.0` / 0.49.1 | Crafted multi-range headers trigger quadratic processing in `FileResponse`, including `StaticFiles`. Measure bounded growth against a file-serving endpoint. |
-
-Multipart file spooling has a separate [event-loop blocking vulnerability](https://github.com/Kludex/starlette/security/advisories/GHSA-2c2j-9gv5-cj73), with 0.47.2 listed as patched: crossing the in-memory spool threshold can perform disk rollover on the event thread. Check the parser and upload path rather than treating a general request-body limit as coverage of all form-parser issues.
+For `request.form()`, test URL-encoded and multipart limits separately; a limit enforced on one parser may not constrain the other. Check whether crossing an upload's memory-to-disk spool threshold blocks the event loop ([form limits](https://github.com/Kludex/starlette/security/advisories/GHSA-82w8-qh3p-5jfq), [file spooling](https://github.com/Kludex/starlette/security/advisories/GHSA-2c2j-9gv5-cj73)).
 
 ### Authentication & Authorization
 

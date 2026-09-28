@@ -79,7 +79,7 @@ JNDI injection is not itself a serialization format. It becomes part of this wor
 
 ### Python Pickle
 
-**Model checkpoints:** `torch.load(..., weights_only=True)` is not an unconditional safe boundary. [GHSA-63cw-57p8-fm3p](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p) affects PyTorch through 2.9.1 and is fixed in 2.10.0. Malformed pickle opcodes and inconsistent storage metadata can corrupt memory even with the restricted unpickler. Trace uploaded/downloaded `.pth` files through the exact loader and worker runtime; checking only for `weights_only=False` misses this path. Inspect custom safe-global allowlists and alternative checkpoint loaders separately.
+**Model checkpoints:** `torch.load(..., weights_only=True)` does not rule out parser/storage memory corruption; the restricted loader is affected through PyTorch 2.9.1, with a fix in 2.10.0. Trace untrusted checkpoints through the exact loader and inspect safe-global allowlists ([PyTorch advisory](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p)).
 
 Pickle executes arbitrary code during unpickling by design:
 ```python
@@ -95,8 +95,6 @@ class Exploit:
 !!python/object/apply:os.system ['id']
 ```
 When `yaml.load` used instead of `yaml.safe_load`.
-
-**JavaScript YAML resource attacks:** js-yaml `!!omap` uniqueness checks cause quadratic parser work on affected versions. Fixed in 3.15.1 / 4.3.1 / 5.2.1 ([advisory](https://github.com/nodeca/js-yaml/security/advisories/GHSA-5p4m-2wfm-xmqj)). Repeated merges of empty mappings bypass `maxTotalMergeKeys` on affected versions; fixed in 3.15.2 / 4.3.2; merges are enabled by default on those branches ([merge-limit advisory](https://github.com/nodeca/js-yaml/security/advisories/GHSA-2883-xcg3-v3hh)). Resolve the schema and parser branch, then use bounded input growth in an isolated worker to distinguish execution gadgets from CPU-exhaustion paths.
 
 ### PHP unserialize()
 

@@ -55,7 +55,7 @@ Cross-site scripting persists because context, parser, and framework edges are c
 
 ### DOMPurify Live-Node Sanitization
 
-[GHSA-x4vx-rjvf-j5p4](https://github.com/cure53/DOMPurify/security/advisories/GHSA-x4vx-rjvf-j5p4), fixed in DOMPurify 3.4.7, affects `IN_PLACE` sanitization through 3.4.6 when an attacker supplies live DOM objects with a controlled observable `nodeName`. A script node can be misclassified and survive insertion into the document. Trace same-origin iframe/popup node references or `adoptNode()` into `sanitize(node, { IN_PLACE: true })`; a raw HTML string is not the prerequisite, and ordinary string-input sanitization is excluded. Record the actual node source and sanitization mode before selecting this bypass.
+Distinguish HTML-string input from live DOM objects sanitized with `IN_PLACE`. Through DOMPurify 3.4.6, a controlled observable `nodeName` can make a script node survive sanitization; fixed in 3.4.7. Trace same-origin foreign nodes or `adoptNode()` into this mode before selecting the bypass ([advisory](https://github.com/cure53/DOMPurify/security/advisories/GHSA-x4vx-rjvf-j5p4)).
 
 ### DOM XSS
 

@@ -57,15 +57,10 @@ Map endpoints, authentication classes, and permission classes per route.
 
 ## Key Vulnerabilities
 
-### Framework Vulnerabilities
+### Request and Spatial Input Handling
 
-- **ASGI header identity — CVE-2026-3902:** underscore-bearing headers can collide with trusted hyphenated headers during `ASGIRequest` normalization. Trace proxy-injected identity headers into `request.META` and compare underscore/hyphen forms; this is an ASGI-specific trust boundary. Fixed in 6.0.4 / 5.2.13 / 4.2.30. Django 4.2 is unsupported as of April 7, 2026 ([advisory](https://www.djangoproject.com/weblog/2026/apr/07/security-releases/)).
-- **GeoDjango — CVE-2026-15307:** attacker-controlled spatial lookup strings/dictionaries can reach `GDALRaster`, causing server-side requests or file writes depending on the driver. Admin staff with view permission on a model containing a spatial field can reach the path through changelist filtering; also inspect custom filter APIs. Direct model-field assignments remain a separate input path after the lookup fix.
-- **Admin stored XSS — CVE-2026-15920:** unsafe-scheme values stored in a `URLField` can become clickable links in changelists/read-only displays. Trace imports, APIs, and direct saves that bypass form validation into an administrator's render path.
-- **Geometry parser DoS — CVE-2026-15830:** nested WKT/WKB geometry collections can crash GEOS. The fix limits collection depth/count; GeoJSON uses a different parser and is excluded from this specific issue. Inspect custom `max_geom_collections` overrides.
-- **Language cache growth — CVE-2026-15337:** many distinct long language codes populate the `check_for_language()` cache; inspect exposure of the optional `set_language` view. This is bounded memory consumption, not an arbitrary process-memory primitive.
-
-CVE-2026-15307, CVE-2026-15920, CVE-2026-15830, and CVE-2026-15337 are fixed in Django 6.0.8 / 5.2.17 and the 6.1 branch ([Django advisories](https://www.djangoproject.com/weblog/2026/aug/04/security-releases/)). Match backports to the installed branch rather than comparing only major versions.
+- Under ASGI, compare underscore/hyphen forms of proxy-injected identity headers through `ASGIRequest` normalization into `request.META`. Check the installed branch against the [header-collision advisory](https://www.djangoproject.com/weblog/2026/apr/07/security-releases/); Django 4.2 is unsupported.
+- For GeoDjango, trace attacker-controlled spatial lookup strings/dictionaries into `GDALRaster`: driver behavior can turn them into server-side requests or file writes. Include custom filter APIs and admin changelist filtering; direct model-field assignment is a separate input path ([spatial lookup advisory](https://www.djangoproject.com/weblog/2026/aug/04/security-releases/)).
 
 ### Authentication & Authorization
 
