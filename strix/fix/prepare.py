@@ -29,6 +29,7 @@ from strix.fix.contracts import (
     RepairOutcome,
     RepairStatus,
     VerificationDecision,
+    VerificationTarget,
     VerifierResult,
 )
 from strix.fix.evidence import command_status
@@ -414,10 +415,27 @@ def _verification_passes(
     checks: list[CheckResult],
     verifier: VerifierResult,
 ) -> bool:
+    evidence = [
+        *checks,
+        *(
+            leg
+            for test in verifier.regression_tests
+            for leg in (test.base, test.patched, test.behavior)
+        ),
+    ]
+    environments = {item.environment_id for item in evidence if item.environment_id}
+    patched_sources = {
+        item.source_digest
+        for item in evidence
+        if item.target is not VerificationTarget.BASE and item.source_digest
+    }
     return (
         _required_checks_pass(checks)
+        and len(environments) <= 1
+        and len(patched_sources) <= 1
         and verifier.decision is VerificationDecision.VERIFIED
         and verifier.security_invariant_closed
+        and verifier.reproduction_executed
         and not verifier.gaps
         and verifier.blocker is None
         and bool(verifier.regression_tests)
@@ -516,13 +534,16 @@ async def prepare_fix(  # noqa: PLR0915
         gaps: list[str] | None = None,
     ) -> FixPreparationResultV1:
         manifest, summary, artifact = await manifest_builder(workspace)
+        retained_verifier = verifier or (
+            context.feedback[-1].verifier if context.feedback else None
+        )
         return _result(
             context,
             state=state,
             reason=reason,
             started=started,
             checks=checks,
-            verifier=verifier,
+            verifier=retained_verifier,
             reproduction=reproduction,
             manifest=manifest,
             diff_summary=summary,
@@ -592,6 +613,7 @@ async def prepare_fix(  # noqa: PLR0915
                 return await finish(
                     PreparationState.FAILED, "The repair did not change repository source."
                 )
+            await manifest_builder(workspace)  # Save the patch before any test can fail.
             planned = await check_planner(context, manifest) if check_planner else request.checks
             # Retain partial execution if a later command is interrupted.
             checks = record.checks
@@ -599,11 +621,29 @@ async def prepare_fix(  # noqa: PLR0915
                 if cancelled():
                     raise PreparationCancelledError
                 checks.append(await runner(workspace, command))
+            # A late setup recovery invalidates checks from the old environment.
+            # Refresh earlier checks, with a bound even if setup keeps changing.
+            epoch = next(
+                (item.environment_id for item in reversed(checks) if item.environment_id), None
+            )
+            for _refresh in range(2):
+                outdated = [
+                    index
+                    for index, item in enumerate(checks)
+                    if epoch and item.environment_id != epoch
+                ]
+                if not outdated:
+                    break
+                for index in outdated:
+                    checks[index] = await runner(workspace, planned[index])
+                    epoch = checks[index].environment_id or epoch
             required = [item for item in checks if item.required]
             regressions = [
                 item
                 for item in required
-                if item.status is CheckStatus.FAILED and not _matches_baseline_failure(item)
+                if item.status is CheckStatus.FAILED
+                and item.failure_kind != "source_changed"
+                and not _matches_baseline_failure(item)
             ]
             unchanged_retry = (
                 len(context.feedback) > 1
@@ -668,7 +708,19 @@ async def prepare_fix(  # noqa: PLR0915
             baseline = [item for item in required if _matches_baseline_failure(item)]
             blocker = verifier.blocker
             if blocker is None:
-                if unavailable or not required:
+                internal_failures = [
+                    item
+                    for item in verifier.security_tests
+                    if item.failure_kind in {"harness", "unknown", "source_changed", "timeout"}
+                ]
+                if internal_failures or (not verifier.security_tests and not verifier.gaps):
+                    blocker = PreparationBlocker(
+                        kind=BlockerKind.VERIFICATION_RUNTIME,
+                        summary="Fix prepared; Strix could not complete verification.",
+                        user_action="Retry verification or review the prepared draft.",
+                        details=[item.name for item in internal_failures] or gaps,
+                    )
+                elif unavailable or not required:
                     blocker = PreparationBlocker(
                         kind=BlockerKind.ENVIRONMENT,
                         summary=(

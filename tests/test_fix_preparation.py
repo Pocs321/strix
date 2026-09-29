@@ -1041,3 +1041,101 @@ def test_candidate_keeps_full_finding_without_inventing_reproduction() -> None:
     assert candidate and candidate.finding
     assert candidate.finding.description == "Critical exploit context."
     assert candidate.reproduction is None
+
+
+def test_ambiguous_imports_and_syntax_never_authorize_environment_recovery() -> None:
+    for output in [
+        "Cannot find module '/tmp/test/skills/policy.js'",
+        "No module named 'wrong_repo_path'",
+        "SyntaxError: invalid syntax",
+    ]:
+        status, kind = command_status(1, output)
+        assert status is CheckStatus.FAILED
+        assert kind == "unknown"
+    assert command_status(127, "bun: command not found") == (CheckStatus.UNAVAILABLE, "environment")
+
+
+def test_regression_requires_consistent_execution_provenance() -> None:
+    regression = _regression()
+    for leg in (regression.base, regression.patched, regression.behavior):
+        leg.source_digest = "a" * 64
+        leg.environment_id = "execution:0"
+    assert regression.passed()
+    regression.base.environment_id = "execution:1"
+    assert not regression.passed()
+    regression.base.environment_id = "execution:0"
+    regression.behavior = regression.behavior.model_copy(update={"source_digest": "b" * 64})
+    assert not regression.passed()
+
+
+@pytest.mark.asyncio
+async def test_late_setup_refreshes_earlier_checks_before_verification(tmp_path: Path) -> None:
+    workspace, commit = _workspace(tmp_path)
+    request = _request(_candidate(commit))
+    request.checks.append(CommandSpec(name="native tests", argv=["tests"]))
+    epoch = 0
+    calls: list[str] = []
+
+    async def runner(_workspace: Path, command: CommandSpec) -> CheckResult:
+        nonlocal epoch
+        calls.append(command.name)
+        if command.name == "native tests":
+            epoch = 1
+        return CheckResult(
+            name=command.name,
+            argv=command.argv,
+            status=CheckStatus.PASSED,
+            exit_code=0,
+            duration_seconds=0,
+            environment_id=f"execution:{epoch}",
+            source_digest="a" * 64,
+        )
+
+    async def verify(context: PreparationContext, checks: list[CheckResult]) -> VerifierResult:
+        assert {item.environment_id for item in checks} == {"execution:1"}
+        result = await _verified(context, checks)
+        for leg in (
+            result.regression_tests[0].base,
+            result.regression_tests[0].patched,
+            result.regression_tests[0].behavior,
+        ):
+            leg.environment_id = "execution:1"
+            leg.source_digest = "a" * 64
+        return result
+
+    result = await prepare_fix(
+        request, workspace, repair=_noop_repair, verify=verify, command_runner=runner
+    )
+    assert result.state is PreparationState.READY
+    assert calls == ["compile", "native tests", "compile"]
+
+
+@pytest.mark.asyncio
+async def test_harness_failure_retains_patch_and_does_not_blame_customer(tmp_path: Path) -> None:
+    workspace, commit = _workspace(tmp_path)
+
+    async def broken_verifier(
+        _context: PreparationContext, _checks: list[CheckResult]
+    ) -> VerifierResult:
+        return VerifierResult(
+            decision=VerificationDecision.INCONCLUSIVE,
+            summary="Cannot execute verifier test.",
+            security_tests=[
+                CheckResult(
+                    name="test",
+                    argv=["python", "test.py"],
+                    status=CheckStatus.FAILED,
+                    exit_code=1,
+                    duration_seconds=0,
+                    failure_kind="unknown",
+                )
+            ],
+        )
+
+    result = await prepare_fix(
+        _request(_candidate(commit)), workspace, repair=_noop_repair, verify=broken_verifier
+    )
+    assert result.state is PreparationState.BLOCKED
+    assert result.blocker.kind is BlockerKind.VERIFICATION_RUNTIME
+    assert result.final_file_manifest
+    assert "prerequisite" not in result.blocker.user_action

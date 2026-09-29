@@ -65,6 +65,7 @@ class BlockerKind(StrEnum):
     CREDENTIAL = "credential"
     EXTERNAL_CONFIGURATION = "external_configuration"
     SECURITY_EVIDENCE = "security_evidence"
+    VERIFICATION_RUNTIME = "verification_runtime"
 
 
 class PreparationBlocker(ContractModel):
@@ -211,9 +212,13 @@ class CheckResult(ContractModel):
     baseline_output: str | None = None
     cwd: str = "."
     baseline_exit_code: int | None = None
-    failure_kind: Literal["environment", "timeout", "check", "source_changed"] | None = None
+    failure_kind: (
+        Literal["environment", "timeout", "check", "source_changed", "harness", "unknown"] | None
+    ) = None
     workspace_root: str | None = None
     baseline_workspace_root: str | None = None
+    source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    environment_id: str | None = None
 
 
 class RegressionTestResult(ContractModel):
@@ -227,6 +232,15 @@ class RegressionTestResult(ContractModel):
     behavior: CheckResult
 
     def passed(self) -> bool:
+        results = (self.base, self.patched, self.behavior)
+        # Legacy records remain readable. Once provenance is supplied, every leg
+        # must have it and the environment must be unchanged across the pair.
+        if any(item.source_digest or item.environment_id for item in results) and (
+            not all(item.source_digest and item.environment_id for item in results)
+            or len({item.environment_id for item in results}) != 1
+            or self.patched.source_digest != self.behavior.source_digest
+        ):
+            return False
         return (
             self.base.target is VerificationTarget.BASE
             and self.patched.target is VerificationTarget.PATCHED
