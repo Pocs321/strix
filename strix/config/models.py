@@ -36,6 +36,7 @@ from openai.types.responses import (
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared import Reasoning
 
+from strix.agents.prompt import CACHE_POINT
 from strix.config import codex
 from strix.config.loader import load_settings
 from strix.config.tool_call_ids import TurnCallIdRewriter, dedupe_input
@@ -370,24 +371,20 @@ def _split_cached_prefix(
     model_input: str | list[Any],
     model_settings: ModelSettings,
 ) -> tuple[str | None, str | list[Any]]:
-    """Send the per-run scope as its own system message on cache-point routes.
+    """Split the system prompt at each ``CACHE_POINT`` on cache-point routes.
 
-    LiteLLM puts a cache point at the end of each system message, so the
-    shared prompt before ``<run_scope>`` gets its own and is reused across runs.
+    LiteLLM puts a cache point at the end of each system message, so each part
+    gets its own. Other routes get the prompt with the markers removed.
     """
+    if not system_instructions or CACHE_POINT not in system_instructions:
+        return system_instructions, model_input
     extra_args = model_settings.extra_args or {}
-    if not system_instructions or "cache_control_injection_points" not in extra_args:
-        return system_instructions, model_input
-    shared, tag, scope = system_instructions.partition("<run_scope>")
-    if not tag:
-        return system_instructions, model_input
+    if "cache_control_injection_points" not in extra_args:
+        return system_instructions.replace(CACHE_POINT, ""), model_input
     if isinstance(model_input, str):
         model_input = [{"role": "user", "content": model_input}]
-    return None, [
-        {"role": "system", "content": shared},
-        {"role": "system", "content": tag + scope},
-        *model_input,
-    ]
+    parts = [part for part in system_instructions.split(CACHE_POINT) if part.strip()]
+    return None, [*({"role": "system", "content": part} for part in parts), *model_input]
 
 
 async def _aclose(stream: AsyncIterator[TResponseStreamEvent]) -> None:

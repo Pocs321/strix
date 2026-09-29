@@ -293,11 +293,12 @@ def test_scope_is_sent_as_its_own_system_message_on_cache_point_routes() -> None
     assert isinstance(model_input, list)
     assert [item["role"] for item in model_input] == ["system", "system", "user"]
     assert "https://target.invalid" not in model_input[0]["content"]
-    assert model_input[1]["content"].startswith("<run_scope>")
+    assert "https://target.invalid" in model_input[1]["content"]
+    assert "<cache_point>" not in model_input[0]["content"] + model_input[1]["content"]
 
 
-def test_system_prompt_is_unchanged_without_cache_points() -> None:
+def test_cache_point_marker_is_removed_without_cache_points() -> None:
     settings = make_model_settings(None, model_name="openai/gpt-5")
-    prompt = "shared\n<run_scope>\ntargets\n</run_scope>"
+    prompt = "shared\n<cache_point>\ntargets"
 
-    assert _split_cached_prefix(prompt, "go", settings) == (prompt, "go")
+    assert _split_cached_prefix(prompt, "go", settings) == ("shared\n\ntargets", "go")

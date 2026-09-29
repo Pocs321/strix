@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIRNAME = "prompts"
 
+# Marks where the system prompt is split so the part before it can be cached.
+# Removed before the prompt is sent.
+CACHE_POINT = "<cache_point>"
+
 
 def _resolve_skills(
     *,
