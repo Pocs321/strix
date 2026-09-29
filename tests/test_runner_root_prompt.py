@@ -6,6 +6,7 @@ flow through to the root agent's ``build_strix_agent`` call.
 
 from __future__ import annotations
 
+import os
 import types
 from typing import Any
 
@@ -277,6 +278,16 @@ def test_scope_is_rendered_once_at_the_end_of_the_prompt() -> None:
 
     assert prompt.count("SYSTEM-VERIFIED SCOPE") == 1
     assert prompt.index("</available_skills>") < prompt.index("SYSTEM-VERIFIED SCOPE")
+
+
+def test_requested_skills_follow_the_shared_prefix() -> None:
+    xss = render_system_prompt(skills=["xss"], include_scope=False)
+    sqli = render_system_prompt(skills=["sql_injection"], include_scope=False)
+
+    shared = os.path.commonprefix([xss, sqli])
+    assert "</available_skills>" in shared
+    assert shared.count("<cache_point>") == 1
+    assert "<xss>" in xss.split("<cache_point>")[1]
 
 
 def test_scope_is_sent_as_its_own_system_message_on_cache_point_routes() -> None:

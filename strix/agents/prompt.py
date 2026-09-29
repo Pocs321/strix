@@ -102,6 +102,16 @@ def render_system_prompt(
             ),
         )
 
+        shared = {
+            name.split("/")[-1]
+            for name in _resolve_skills(
+                requested=None,
+                scan_mode=scan_mode,
+                is_whitebox=is_whitebox,
+                is_root=is_root,
+                is_diff_scoped=is_diff_scoped,
+            )
+        }
         skills_to_load = _resolve_skills(
             requested=skills,
             scan_mode=scan_mode,
@@ -112,8 +122,11 @@ def render_system_prompt(
         skill_content = load_skills(skills_to_load)
         env.globals["get_skill"] = lambda name: skill_content.get(name, "")
 
+        # Skills every agent of this kind loads come first, so siblings share them
+        # as a cached prefix; the ones the caller asked for vary and go after.
         rendered = env.get_template("system_prompt.jinja").render(
-            loaded_skill_names=list(skill_content.keys()),
+            shared_skill_names=[name for name in skill_content if name in shared],
+            requested_skill_names=[name for name in skill_content if name not in shared],
             available_skills=get_available_skills(),
             interactive=interactive,
             is_root=is_root,
