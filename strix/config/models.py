@@ -8,6 +8,7 @@ import inspect
 import logging
 import os
 import time
+import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
 
@@ -746,6 +747,11 @@ def _configure_litellm_compatibility() -> None:
     _install_openrouter_stream_cost_capture()
 
 
+# Agent ids are 8 hex characters and can repeat across runs; the session id
+# OpenRouter pins a provider to must not, so each agent gets its own UUID.
+_OPENROUTER_SESSION_IDS: dict[str, str] = {}
+
+
 def _install_openrouter_stream_cost_capture() -> None:
     """Preserve OpenRouter's per-stream cost, which LiteLLM drops when streaming.
 
@@ -764,14 +770,16 @@ def _install_openrouter_stream_cost_capture() -> None:
         OpenrouterConfig,
     )
 
-    from strix.report.state import streamed_openrouter_costs
+    from strix.report.state import record_openrouter_provider, streamed_openrouter_costs
 
     class _StrixOpenRouterStreamingHandler(OpenRouterChatCompletionStreamingHandler):
         def chunk_parser(self, chunk: dict[str, Any]) -> Any:
             stream = super().chunk_parser(chunk)
-            streamed_openrouter_costs.remember(
-                chunk.get("id") or getattr(stream, "id", None), chunk.get("usage")
-            )
+            usage = chunk.get("usage")
+            response_id = chunk.get("id") or getattr(stream, "id", None)
+            streamed_openrouter_costs.remember(response_id, usage)
+            if usage:
+                record_openrouter_provider(chunk.get("provider"), usage)
             return stream
 
     class _StrixOpenrouterConfig(OpenrouterConfig):
@@ -783,6 +791,16 @@ def _install_openrouter_stream_cost_capture() -> None:
                 sync_stream=sync_stream,
                 json_mode=json_mode,
             )
+
+        def transform_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            # Pin each agent's calls to one upstream provider so its prompt cache
+            # survives between turns.
+            body = super().transform_request(*args, **kwargs)
+            agent_id = request_log.current_call_context().agent_id
+            if agent_id:
+                session_id = _OPENROUTER_SESSION_IDS.setdefault(agent_id, str(uuid.uuid4()))
+                body.setdefault("session_id", session_id)
+            return body
 
     # LiteLLM's provider-config factory reads litellm.OpenrouterConfig at call
     # time, so overriding the attribute is enough for the subclass to take
