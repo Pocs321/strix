@@ -6,6 +6,7 @@ import asyncio
 import functools
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import time
@@ -29,10 +30,9 @@ from strix.fix.contracts import (
     RepairOutcome,
     RepairStatus,
     VerificationDecision,
-    VerificationTarget,
     VerifierResult,
 )
-from strix.fix.evidence import command_status
+from strix.fix.evidence import command_status, record_test_execution
 from strix.fix.locations import AnchorStatus, anchor_location
 
 
@@ -378,6 +378,8 @@ def _result(
 ) -> FixPreparationResultV1:
     return FixPreparationResultV1(
         state=state,
+        validation_mode="native_tests",
+        test_plan=context.feedback[-1].repair.test_plan if context.feedback else None,
         stop_reason=reason,
         source_identity=context.candidate.source_identity,
         candidate=context.candidate,
@@ -408,92 +410,49 @@ def _repair_outcome(value: RepairOutcome | None) -> RepairOutcome:
 
 def _required_checks_pass(checks: list[CheckResult]) -> bool:
     required = [result for result in checks if result.required]
-    return bool(required) and all(result.status is CheckStatus.PASSED for result in required)
+    return bool(required) and all(
+        result.status is CheckStatus.PASSED and result.exit_code == 0 for result in required
+    )
 
 
-def _verification_passes(
-    checks: list[CheckResult],
-    verifier: VerifierResult,
-) -> bool:
-    evidence = [
-        *checks,
-        *(
-            leg
-            for test in verifier.regression_tests
-            for leg in (test.base, test.patched, test.behavior)
-        ),
-    ]
-    environments = {item.environment_id for item in evidence if item.environment_id}
-    patched_sources = {
-        item.source_digest
-        for item in evidence
-        if item.target is not VerificationTarget.BASE and item.source_digest
-    }
+def _verification_passes(checks: list[CheckResult], verifier: VerifierResult) -> bool:
     return (
         _required_checks_pass(checks)
-        and len(environments) <= 1
-        and len(patched_sources) <= 1
+        and any(
+            item.purpose == "regression" and item.status is CheckStatus.PASSED for item in checks
+        )
+        and len({item.environment_id for item in checks if item.environment_id}) <= 1
+        and len({item.source_digest for item in checks if item.source_digest}) <= 1
         and verifier.decision is VerificationDecision.VERIFIED
         and verifier.security_invariant_closed
-        and verifier.reproduction_executed
+        and verifier.regression_test_valid
+        and verifier.unit_test_coverage_valid
+        and verifier.review_basis in {"execution", "code_review"}
         and not verifier.gaps
         and verifier.blocker is None
-        and bool(verifier.regression_tests)
-        and all(result.passed() for result in verifier.regression_tests)
     )
 
 
-def _verification_gaps(
-    repair_outcome: RepairOutcome,
-    checks: list[CheckResult],
-    verifier: VerifierResult,
-) -> list[str]:
-    gaps = list(repair_outcome.gaps)
-    required = [result for result in checks if result.required]
-    if not required:
-        gaps.append("No required repository check was configured.")
-    gaps.extend(
-        f"{result.name}: required check {result.status}"
-        for result in required
-        if result.status is not CheckStatus.PASSED
-    )
-    gaps.extend(
-        f"{result.name}: optional check {result.status}"
-        for result in checks
-        if not result.required and result.status is not CheckStatus.PASSED
-    )
-    if not verifier.regression_tests or not all(
-        item.passed() for item in verifier.regression_tests
-    ):
-        gaps.append(
-            "A paired functional regression and legitimate-behavior test is still required."
-        )
-    if not verifier.reproduction_executed:
-        gaps.append("The independent verifier did not execute the security reproduction.")
-    if not verifier.security_invariant_closed:
-        gaps.append("The independent verifier did not prove the security invariant.")
-    gaps.extend(verifier.gaps)
-    return list(dict.fromkeys(gaps))
+def _test_plan_gaps(repair: RepairOutcome, manifest: list[FileManifestEntry]) -> list[str]:
+    plan = repair.test_plan
+    if plan is None:
+        return ["The repair must supply a regression test and the repository unit-test commands."]
+    changed = {entry.path for entry in manifest if entry.operation != "delete"}
+    missing = [path for path in plan.regression_files if path not in changed]
+    return [f"Regression test must be added or updated in the patch: {path}" for path in missing]
 
 
-def _matches_baseline_failure(result: CheckResult) -> bool:
-    if result.baseline_status is not result.status or result.status not in {
-        CheckStatus.FAILED,
-        CheckStatus.UNAVAILABLE,
-        CheckStatus.SKIPPED,
-    }:
-        return False
-    if result.baseline_exit_code != result.exit_code:
-        return False
-    candidate_output = result.output
-    baseline_output = result.baseline_output or ""
-    if result.workspace_root:
-        candidate_output = candidate_output.replace(result.workspace_root, "<repository>")
-    if result.baseline_workspace_root:
-        baseline_output = baseline_output.replace(result.baseline_workspace_root, "<repository>")
-    candidate_output = " ".join(candidate_output.split())
-    baseline_output = " ".join(baseline_output.split())
-    return bool(candidate_output and candidate_output == baseline_output)
+def _test_commands(repair: RepairOutcome) -> list[CommandSpec]:
+    plan = repair.test_plan
+    if plan is None:
+        return []
+    return [
+        plan.regression_test.model_copy(update={"purpose": "regression", "required": True}),
+        *(
+            item.model_copy(update={"purpose": "unit", "required": True})
+            for item in plan.unit_tests
+        ),
+    ]
 
 
 async def prepare_fix(  # noqa: PLR0915
@@ -600,6 +559,7 @@ async def prepare_fix(  # noqa: PLR0915
             )
             context.feedback.append(record)
             record.repair = _repair_outcome(await repair(context, checks))
+            checks = record.checks
             record.workspace_digest = await _workspace_digest(workspace)
             manifest, _, _ = await build_git_manifest(workspace)
             if not manifest:
@@ -614,146 +574,98 @@ async def prepare_fix(  # noqa: PLR0915
                     PreparationState.FAILED, "The repair did not change repository source."
                 )
             await manifest_builder(workspace)  # Save the patch before any test can fail.
-            planned = await check_planner(context, manifest) if check_planner else request.checks
-            # Retain partial execution if a later command is interrupted.
-            checks = record.checks
-            for command in planned:
-                if cancelled():
-                    raise PreparationCancelledError
-                checks.append(await runner(workspace, command))
-            # A late setup recovery invalidates checks from the old environment.
-            # Refresh earlier checks, with a bound even if setup keeps changing.
-            epoch = next(
-                (item.environment_id for item in reversed(checks) if item.environment_id), None
-            )
-            for _refresh in range(2):
-                outdated = [
-                    index
-                    for index, item in enumerate(checks)
-                    if epoch and item.environment_id != epoch
-                ]
-                if not outdated:
-                    break
-                for index in outdated:
-                    checks[index] = await runner(workspace, planned[index])
-                    epoch = checks[index].environment_id or epoch
-            required = [item for item in checks if item.required]
-            regressions = [
-                item
-                for item in required
-                if item.status is CheckStatus.FAILED
-                and item.failure_kind != "source_changed"
-                and not _matches_baseline_failure(item)
-            ]
-            unchanged_retry = (
-                len(context.feedback) > 1
-                and context.feedback[-2].workspace_digest == record.workspace_digest
-            )
             can_retry = (
-                record.repair.status is RepairStatus.COMPLETE
-                and attempt < resolved_policy.max_repair_attempts
-                and not unchanged_retry
+                attempt < resolved_policy.max_repair_attempts
+                and record.repair.status is not RepairStatus.BLOCKED
             )
-            if regressions:
+            plan_gaps = _test_plan_gaps(record.repair, manifest)
+            if plan_gaps:
+                record.repair.gaps = list(dict.fromkeys([*record.repair.gaps, *plan_gaps]))
                 if can_retry:
                     continue
                 return await finish(
-                    PreparationState.FAILED,
-                    "The repair did not pass the repository quality gate.",
-                    gaps=[f"{item.name}: {item.output}" for item in regressions],
+                    PreparationState.BLOCKED,
+                    "The patch is saved, but its regression-test handoff is incomplete.",
+                    blocker=record.repair.blocker,
+                    gaps=record.repair.gaps,
                 )
-            # Missing tools and pre-existing failures do not erase attainable security evidence.
+            additional = await check_planner(context, manifest) if check_planner else request.checks
+            planned = [*_test_commands(record.repair), *additional]
+            unique: dict[tuple[str, tuple[str, ...], str], CommandSpec] = {}
+            for command in planned:
+                key = (command.purpose, tuple(command.argv), command.cwd)
+                previous = unique.get(key)
+                unique[key] = command.model_copy(
+                    update={"required": command.required or bool(previous and previous.required)}
+                )
+            checks = record.checks
+            for command in unique.values():
+                if cancelled():
+                    raise PreparationCancelledError
+                checks.append(record_test_execution(await runner(workspace, command), command))
+            reproduction = next((item for item in checks if item.purpose == "regression"), None)
+            record.security_reproduction = reproduction
+            failed = [
+                item
+                for item in checks
+                if item.required and (item.status is not CheckStatus.PASSED or item.exit_code != 0)
+            ]
+            if failed:
+                if can_retry:
+                    continue
+                return await finish(
+                    PreparationState.BLOCKED,
+                    "The patch is saved, but required tests or checks have not passed.",
+                    blocker=PreparationBlocker(
+                        kind=BlockerKind.VERIFICATION_RUNTIME,
+                        summary="Required tests or checks have not passed.",
+                        user_action="Review the recorded failures and retry after resolving them.",
+                        details=[f"{item.name}: {item.status}" for item in failed],
+                    ),
+                    gaps=[f"{item.name}: {item.status}" for item in failed],
+                )
+            # Review the exact repair and its native test results. No second harness is required.
             verifier = await verify(context, checks)
             record.verifier = verifier
-            reproduction = next(
-                (item.patched for item in reversed(verifier.regression_tests) if item.passed()),
-                verifier.regression_tests[-1].patched if verifier.regression_tests else None,
-            )
-            record.security_reproduction = reproduction
-            gaps = _verification_gaps(record.repair, checks, verifier)
             if record.workspace_digest != await _workspace_digest(workspace):
                 return await finish(
                     PreparationState.FAILED,
-                    "Verification changed the prepared source; its evidence cannot "
-                    "approve this artifact.",
+                    "Review changed the prepared source; validation must be rerun.",
                 )
             if verifier.decision is VerificationDecision.REJECTED:
                 if verifier.repairable and can_retry:
                     continue
                 return await finish(
                     PreparationState.FAILED,
-                    "The independent security verifier found a repair defect.",
-                    gaps=gaps,
+                    "The independent reviewer found a repair or regression-test defect.",
+                    gaps=verifier.gaps,
                 )
             if record.repair.status is RepairStatus.BLOCKED:
                 return await finish(
                     PreparationState.BLOCKED,
                     record.repair.summary,
                     blocker=record.repair.blocker,
-                    gaps=gaps,
+                    gaps=record.repair.gaps,
                 )
             if _verification_passes(checks, verifier) and not record.repair.gaps:
                 return await finish(
                     PreparationState.READY,
-                    "The fix passed relevant repository checks and functional security "
-                    "verification.",
-                    gaps=gaps,
+                    "Tests and required checks passed; independent review approved a draft PR.",
                 )
-            unavailable = [
-                item
-                for item in required
-                if item.status
-                in {CheckStatus.UNAVAILABLE, CheckStatus.SKIPPED, CheckStatus.CANCELLED}
-            ]
-            baseline = [item for item in required if _matches_baseline_failure(item)]
-            blocker = verifier.blocker
-            if blocker is None:
-                internal_failures = [
-                    item
-                    for item in verifier.security_tests
-                    if item.failure_kind in {"harness", "unknown", "source_changed", "timeout"}
-                ]
-                if internal_failures or (not verifier.security_tests and not verifier.gaps):
-                    blocker = PreparationBlocker(
-                        kind=BlockerKind.VERIFICATION_RUNTIME,
-                        summary="Fix prepared; Strix could not complete verification.",
-                        user_action="Retry verification or review the prepared draft.",
-                        details=[item.name for item in internal_failures] or gaps,
-                    )
-                elif unavailable or not required:
-                    blocker = PreparationBlocker(
-                        kind=BlockerKind.ENVIRONMENT,
-                        summary=(
-                            "The patch is prepared, but required repository checks could not run."
-                        ),
-                        user_action=(
-                            "Resolve the reported setup requirement and rerun verification."
-                        ),
-                        details=[f"{item.name}: {item.output}" for item in unavailable]
-                        or ["No relevant repository quality check was identified."],
-                    )
-                elif baseline:
-                    blocker = PreparationBlocker(
-                        kind=BlockerKind.REPOSITORY_BASELINE,
-                        summary="Required checks also fail on the unchanged repository.",
-                        user_action=(
-                            "Resolve the existing check failure or provide an authoritative "
-                            "replacement check."
-                        ),
-                        details=[item.name for item in baseline],
-                    )
-                else:
-                    blocker = PreparationBlocker(
-                        kind=BlockerKind.SECURITY_EVIDENCE,
-                        summary="The patch is prepared, but functional verification is incomplete.",
-                        user_action=(
-                            "Provide the missing test prerequisites or review the remaining "
-                            "evidence gaps."
-                        ),
-                        details=gaps,
-                    )
+            gaps = list(dict.fromkeys([*record.repair.gaps, *verifier.gaps]))
+            if not gaps:
+                gaps = ["Independent review could not confirm the repair and native-test coverage."]
             return await finish(
-                PreparationState.BLOCKED, blocker.summary, blocker=blocker, gaps=gaps
+                PreparationState.BLOCKED,
+                "The patch and test results are saved, but independent review is incomplete.",
+                blocker=verifier.blocker
+                or PreparationBlocker(
+                    kind=BlockerKind.VERIFICATION_RUNTIME,
+                    summary="Independent review is incomplete.",
+                    user_action="Retry review of the saved changes and test evidence.",
+                    details=gaps,
+                ),
+                gaps=gaps,
             )
         return await finish(
             PreparationState.FAILED, "The repair exhausted its configured attempts."
@@ -766,7 +678,10 @@ async def prepare_fix(  # noqa: PLR0915
         return await finish(PreparationState.FAILED, "Fix preparation was cancelled.")
     except TimeoutError:
         return await finish(PreparationState.FAILED, "Fix preparation exceeded its time limit.")
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
+        logging.getLogger(__name__).exception(
+            "Fix preparation failed during attempt %s", context.attempt
+        )
         # Preserve partial work without exposing unredacted exception text.
         return await finish(
             PreparationState.FAILED,

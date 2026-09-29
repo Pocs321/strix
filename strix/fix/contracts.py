@@ -133,6 +133,7 @@ class CommandSpec(ContractModel):
     required: bool = True
     timeout_seconds: int = Field(default=300, ge=1, le=3600)
     cwd: str = "."
+    purpose: Literal["quality", "regression", "unit"] = "quality"
 
     _relative_cwd = field_validator("cwd")(_validate_relative_path)
 
@@ -147,6 +148,28 @@ class CommandSpec(ContractModel):
 class ReproductionSpec(ContractModel):
     instructions: str = Field(min_length=1)
     command: CommandSpec | None = None
+
+
+class RepositoryTestPlan(ContractModel):
+    """The repair agent's native tests, rerun by the controller before review."""
+
+    regression_test: CommandSpec
+    regression_files: list[str] = Field(min_length=1)
+    unit_tests: list[CommandSpec] = []
+    no_unit_tests_reason: str | None = None
+
+    @field_validator("regression_files")
+    @classmethod
+    def validate_files(cls, paths: list[str]) -> list[str]:
+        return list(dict.fromkeys(_validate_relative_path(path) for path in paths))
+
+    @model_validator(mode="after")
+    def explain_missing_suite(self) -> RepositoryTestPlan:
+        if not self.unit_tests and not (self.no_unit_tests_reason or "").strip():
+            raise ValueError(
+                "Provide the existing unit-test commands or explain why no suite exists."
+            )
+        return self
 
 
 class ReportedCheck(ContractModel):
@@ -177,6 +200,8 @@ class FixCandidateV1(ContractModel):
         data = self.model_dump(mode="json")
         if self.finding is None:
             data.pop("finding", None)  # Preserve digests for stored legacy candidates.
+        if data.get("reproduction") and data["reproduction"].get("command"):
+            data["reproduction"]["command"].pop("purpose", None)
         payload = json.dumps(
             data,
             sort_keys=True,
@@ -219,6 +244,8 @@ class CheckResult(ContractModel):
     baseline_workspace_root: str | None = None
     source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     environment_id: str | None = None
+    purpose: Literal["quality", "regression", "unit"] = "quality"
+    tests_passed: int | None = Field(default=None, ge=0)
 
 
 class RegressionTestResult(ContractModel):
@@ -279,6 +306,9 @@ class VerifierResult(ContractModel):
     regression_tests: list[RegressionTestResult] = []
     harnesses: list[VerificationHarness] = []
     notes: list[str] = []
+    review_basis: Literal["execution", "code_review"] | None = None
+    regression_test_valid: bool = False
+    unit_test_coverage_valid: bool = False
 
 
 class RepairOutcome(ContractModel):
@@ -290,6 +320,7 @@ class RepairOutcome(ContractModel):
     blocker: PreparationBlocker | None = None
     checks: list[CommandSpec] = []
     command_results: list[CheckResult] = []
+    test_plan: RepositoryTestPlan | None = None
 
 
 class FixPreparationAttempt(ContractModel):
@@ -313,6 +344,8 @@ class FileManifestEntry(ContractModel):
 
 class FixPreparationResultV1(ContractModel):
     version: Literal["1"] = "1"
+    # Absent on historical records; keep their stronger, paired-proof interpretation.
+    validation_mode: Literal["paired", "native_tests"] = "paired"
     state: PreparationState
     stop_reason: str
     source_identity: SourceIdentity | None
@@ -332,6 +365,7 @@ class FixPreparationResultV1(ContractModel):
     attempts: int = Field(default=0, ge=0)
     elapsed_seconds: float = Field(default=0, ge=0)
     cost_usd: float | None = Field(default=None, ge=0)
+    test_plan: RepositoryTestPlan | None = None
 
 
 def candidate_from_legacy_report(
