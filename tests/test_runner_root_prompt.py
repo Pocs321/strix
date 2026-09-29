@@ -18,8 +18,10 @@ import strix.tools.mcp as mcp_pkg
 import strix.tools.notes.tools as notes_tools
 import strix.tools.todo.tools as todo_tools
 from strix.agents.prompt import render_system_prompt
+from strix.config.models import _split_cached_prefix
 from strix.core import runner
 from strix.core.agents import AgentCoordinator
+from strix.core.inputs import make_model_settings
 from strix.runtime import session_manager
 from strix.tools.mcp import BearerAuth, McpConnectionConfig, McpConnectionRequest
 
@@ -275,3 +277,27 @@ def test_scope_is_rendered_once_at_the_end_of_the_prompt() -> None:
 
     assert prompt.count("SYSTEM-VERIFIED SCOPE") == 1
     assert prompt.index("</available_skills>") < prompt.index("SYSTEM-VERIFIED SCOPE")
+
+
+def test_scope_is_sent_as_its_own_system_message_on_cache_point_routes() -> None:
+    settings = make_model_settings(None, model_name="anthropic/claude-sonnet-5-5")
+    prompt = render_system_prompt(
+        system_prompt_context={
+            "authorized_targets": [{"type": "web_application", "value": "https://target.invalid"}],
+        },
+    )
+
+    system, model_input = _split_cached_prefix(prompt, "go", settings)
+
+    assert system is None
+    assert isinstance(model_input, list)
+    assert [item["role"] for item in model_input] == ["system", "system", "user"]
+    assert "https://target.invalid" not in model_input[0]["content"]
+    assert model_input[1]["content"].startswith("<run_scope>")
+
+
+def test_system_prompt_is_unchanged_without_cache_points() -> None:
+    settings = make_model_settings(None, model_name="openai/gpt-5")
+    prompt = "shared\n<run_scope>\ntargets\n</run_scope>"
+
+    assert _split_cached_prefix(prompt, "go", settings) == (prompt, "go")

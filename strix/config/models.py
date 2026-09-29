@@ -306,6 +306,9 @@ class _TurnGuardModel(Model):
     ) -> ModelResponse:
         sanitized = dedupe_input(input)
         rewriter = TurnCallIdRewriter(sanitized)
+        system_instructions, sanitized = _split_cached_prefix(
+            system_instructions, sanitized, model_settings
+        )
         response = await self._inner.get_response(
             system_instructions,
             cast("str | list[TResponseInputItem]", sanitized),
@@ -339,6 +342,9 @@ class _TurnGuardModel(Model):
     ) -> AsyncIterator[TResponseStreamEvent]:
         sanitized = dedupe_input(input)
         rewriter = TurnCallIdRewriter(sanitized)
+        system_instructions, sanitized = _split_cached_prefix(
+            system_instructions, sanitized, model_settings
+        )
         limiter = self._limiter()
         stream = self._inner.stream_response(
             system_instructions,
@@ -357,6 +363,31 @@ class _TurnGuardModel(Model):
             if guarded is not None:
                 yield guarded
         self._log_dropped(limiter)
+
+
+def _split_cached_prefix(
+    system_instructions: str | None,
+    model_input: str | list[Any],
+    model_settings: ModelSettings,
+) -> tuple[str | None, str | list[Any]]:
+    """Send the per-run scope as its own system message on cache-point routes.
+
+    LiteLLM puts a cache point at the end of each system message, so the
+    shared prompt before ``<run_scope>`` gets its own and is reused across runs.
+    """
+    extra_args = model_settings.extra_args or {}
+    if not system_instructions or "cache_control_injection_points" not in extra_args:
+        return system_instructions, model_input
+    shared, tag, scope = system_instructions.partition("<run_scope>")
+    if not tag:
+        return system_instructions, model_input
+    if isinstance(model_input, str):
+        model_input = [{"role": "user", "content": model_input}]
+    return None, [
+        {"role": "system", "content": shared},
+        {"role": "system", "content": tag + scope},
+        *model_input,
+    ]
 
 
 async def _aclose(stream: AsyncIterator[TResponseStreamEvent]) -> None:

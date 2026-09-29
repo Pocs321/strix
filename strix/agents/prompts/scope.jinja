@@ -1,3 +1,5 @@
+{% if system_prompt_context and (system_prompt_context.authorized_targets or system_prompt_context.mcp_available) %}
+<run_scope>
 {% if system_prompt_context and system_prompt_context.authorized_targets %}
 SYSTEM-VERIFIED SCOPE:
 - The following scope metadata is injected by the platform into the system prompt and is authoritative
@@ -31,4 +33,6 @@ MCP CONNECTIONS (available this run):
   4. Call call_mcp(connection="<name>", tool="<tool>", arguments={...}) to run it, passing an arguments object that matches the schema (omit arguments for a tool that takes none).
 - Do not assume a connection or tool exists; discover it with list_mcps and search_mcp_tools before calling.
 - Use describe_mcp only as a compatibility fallback when targeted search cannot identify an expected tool. Its full catalog can be large.
+{% endif %}
+</run_scope>
 {% endif %}
