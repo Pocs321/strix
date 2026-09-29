@@ -307,7 +307,7 @@ def test_provider_tally_survives_run_record_round_trip() -> None:
             input_tokens=input_tokens,
             cached_tokens=cached_tokens,
             cost=cost,
-            cache_block_tokens=64,
+            cache_block_tokens=128,
         )
 
     restored = LLMUsageLedger()
@@ -329,8 +329,8 @@ def test_provider_tally_counts_cache_misses_per_agent() -> None:
     ledger = LLMUsageLedger()
     calls = [
         ("Z.AI", "a1", 1000, 0),  # first call: nothing to miss
-        ("Z.AI", "a1", 1200, 960),  # previous 1000 cached, rounded down to 64s
-        ("DeepInfra", "a1", 1500, 200),  # 1152 of the previous 1200 due, 952 lost
+        ("Z.AI", "a1", 1200, 960),  # 40 short of the previous 1000: within a block
+        ("DeepInfra", "a1", 1500, 200),  # 1000 of the previous 1200 lost
         ("Z.AI", "a2", 800, 0),  # another agent's first call
         ("Z.AI", "a1", 600, 0),  # prompt shrank: compaction, not a miss
     ]
@@ -341,12 +341,12 @@ def test_provider_tally_counts_cache_misses_per_agent() -> None:
             input_tokens=input_tokens,
             cached_tokens=cached_tokens,
             cost=0.0,
-            cache_block_tokens=64,
+            cache_block_tokens=128,
         )
 
     providers = ledger.to_record()["providers"]
     assert providers["DeepInfra"]["cache_misses"] == 1
-    assert providers["DeepInfra"]["missed_tokens"] == 952
+    assert providers["DeepInfra"]["missed_tokens"] == 1000
     assert providers["Z.AI"]["cache_misses"] == 0
 
 

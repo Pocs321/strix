@@ -99,12 +99,11 @@ class LLMUsageLedger:
         tally.cached_tokens += cached_tokens
         if agent_id:
             previous = self._last_input_tokens.get(agent_id, 0)
-            # The previous prompt is a prefix of this one, so every full block of it
-            # should read back cached. A shrinking prompt means compaction rewrote
-            # it, so a miss is expected.
-            expected = previous - (previous % cache_block_tokens)
-            missed = expected - cached_tokens
-            if input_tokens >= previous and missed > 0:
+            # The previous prompt is a prefix of this one, so all of it but a
+            # partial last block should read back cached. A shrinking prompt means
+            # compaction rewrote it, so a miss is expected.
+            missed = previous - cached_tokens
+            if input_tokens >= previous and missed >= cache_block_tokens:
                 tally.cache_misses += 1
                 tally.missed_tokens += missed
             self._last_input_tokens[agent_id] = input_tokens
