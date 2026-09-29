@@ -5,8 +5,9 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
+import httpx
 import litellm
 import pytest
 from litellm.types.utils import LlmProviders
@@ -267,7 +268,7 @@ def test_openrouter_stream_handler_records_cost() -> None:
     )
 
 
-def test_openrouter_stream_handler_tallies_provider() -> None:
+def test_openrouter_tallies_provider() -> None:
     _install_openrouter_stream_cost_capture()
     config = ProviderConfigManager.get_provider_chat_config(
         model="z-ai/glm-5.3", provider=LlmProviders.OPENROUTER
@@ -292,10 +293,26 @@ def test_openrouter_stream_handler_tallies_provider() -> None:
                 "usage": usage,
             }
         )
+        # Non-streamed replies (LLM_DISABLE_STREAMING) carry the same fields.
+        reply = {
+            "choices": [{"message": {"role": "assistant"}}],
+            "provider": "Together",
+            "usage": usage,
+        }
+        config.transform_response(
+            "z-ai/glm-5.3",
+            httpx.Response(200, json=reply),
+            litellm.ModelResponse(),
+            MagicMock(),
+            {},
+            [],
+            {},
+            {},
+            None,
+        )
 
-    report_state.record_llm_provider.assert_called_once_with(
-        "Together", agent_id=None, input_tokens=1000, cached_tokens=900, cost=0.002
-    )
+    tally = call("Together", agent_id=None, input_tokens=1000, cached_tokens=900, cost=0.002)
+    assert report_state.record_llm_provider.call_args_list == [tally, tally]
 
 
 def test_provider_tally_survives_run_record_round_trip() -> None:

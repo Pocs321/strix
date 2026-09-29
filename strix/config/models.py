@@ -792,6 +792,16 @@ def _install_openrouter_stream_cost_capture() -> None:
                 json_mode=json_mode,
             )
 
+        def transform_response(self, *args: Any, **kwargs: Any) -> Any:
+            # Non-streamed replies (LLM_DISABLE_STREAMING) skip the chunk parser.
+            response = super().transform_response(*args, **kwargs)
+            raw_response = kwargs.get("raw_response", args[1] if len(args) > 1 else None)
+            with contextlib.suppress(Exception):
+                body = raw_response.json()  # type: ignore[union-attr]
+                if body.get("usage"):
+                    record_openrouter_provider(body.get("provider"), body["usage"])
+            return response
+
         def transform_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
             # Pin each agent's calls to one upstream provider so its prompt cache
             # survives between turns.
