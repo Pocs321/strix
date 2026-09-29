@@ -535,7 +535,7 @@ async def test_review_can_request_more_than_two_repairs(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("defect", ["missing_unit", "failed", "empty", "stale", "missing_request"])
-async def test_approval_cannot_waive_required_execution_evidence(
+async def test_agent_approval_owns_test_evidence_without_controller_retries(
     tmp_path: Path, defect: str
 ) -> None:
     workspace, commit = _workspace(tmp_path)
@@ -559,9 +559,12 @@ async def test_approval_cannot_waive_required_execution_evidence(
     request = _request(_candidate(commit))
     request.max_agent_turns = 2
     result = await prepare_fix(request, workspace, repair=repair, verify=_verified)
-    assert result.state is PreparationState.BLOCKED
+    # Deliberately scripted approval: test policy is the reviewer's responsibility.
+    # This tests routing, not whether a real reviewer ought to approve this evidence.
+    assert result.state is PreparationState.READY
     assert result.final_file_manifest
-    assert result.attempt_history[0].repair.gaps
+    assert result.attempts == 1
+    assert not result.attempt_history[0].repair.gaps
 
 
 @pytest.mark.asyncio
@@ -640,7 +643,9 @@ async def test_interruptions_preserve_partial_patch_without_approval(
 
 
 @pytest.mark.asyncio
-async def test_review_mutation_returns_to_repair_instead_of_destroying_run(tmp_path: Path) -> None:
+async def test_review_mutation_blocks_delivery_without_controller_repair_loop(
+    tmp_path: Path,
+) -> None:
     workspace, commit = _workspace(tmp_path)
 
     async def review(context, checks):
@@ -650,16 +655,35 @@ async def test_review_mutation_returns_to_repair_instead_of_destroying_run(tmp_p
         return result
 
     async def repair(context, checks):
-        if context.attempt > 1:
-            assert "deliverable changed" in " ".join(context.feedback[-2].repair.gaps)
-            (workspace / "review.tmp").unlink()
+        assert context.attempt == 1
         return await _noop_repair(context, checks)
 
     result = await prepare_fix(
         _request(_candidate(commit)), workspace, repair=repair, verify=review
     )
-    assert result.state is PreparationState.READY
-    assert result.attempts == 2
+    assert result.state is PreparationState.BLOCKED
+    assert "deliverable changed" in result.stop_reason
+    assert result.attempts == 1
+    assert result.final_file_manifest
+
+
+@pytest.mark.asyncio
+async def test_empty_deliverable_does_not_start_another_repair(tmp_path: Path) -> None:
+    workspace, commit = _workspace(tmp_path)
+
+    async def repair(context, _checks):
+        assert context.attempt == 1
+        return RepairOutcome(status=RepairStatus.COMPLETE, summary="Done.")
+
+    async def review(*_args):
+        raise AssertionError("An empty artifact cannot be delivered")
+
+    result = await prepare_fix(
+        _request(_candidate(commit)), workspace, repair=repair, verify=review
+    )
+    assert result.state is PreparationState.BLOCKED
+    assert result.attempts == 1
+    assert "without a deliverable patch" in result.stop_reason
 
 
 @pytest.mark.parametrize(

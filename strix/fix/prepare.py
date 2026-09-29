@@ -405,34 +405,6 @@ def _repair_outcome(value: RepairOutcome | None) -> RepairOutcome:
     )
 
 
-def validation_gaps(
-    checks: list[CheckResult], source_digest: str | None, requested: list[CommandSpec]
-) -> list[str]:
-    """Check execution facts only; agents judge coverage and the security fix."""
-    gaps: list[str] = []
-    if not source_digest:
-        gaps.append("No source digest was recorded for the prepared patch.")
-    for purpose in ("regression", "unit"):
-        if not any(item.purpose == purpose and item.required for item in checks):
-            gaps.append(f"Run and record the required {purpose} tests.")  # noqa: PERF401
-    for item in checks:
-        if not item.required:
-            continue
-        if item.source_digest != source_digest or not item.environment_id:
-            gaps.append(f"Rerun {item.name}: its results are not for the current patch.")
-        elif item.status is not CheckStatus.PASSED or item.exit_code != 0 or item.tests_passed == 0:
-            gaps.append(f"Resolve and rerun {item.name}: {item.status}.")
-    if len({item.environment_id for item in checks if item.required}) > 1:
-        gaps.append("Required checks refer to different execution environments.")
-    for command in requested:
-        if command.required and not any(
-            item.required and item.argv == command.argv and item.cwd == command.cwd
-            for item in checks
-        ):
-            gaps.append(f"Run the requested check: {command.name}.")  # noqa: PERF401
-    return gaps
-
-
 async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
     request: FixPreparationRequestV1,
     workspace: Path,
@@ -480,7 +452,7 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
             reproduction=next((c for c in checks if c.purpose == "regression"), None),
         )
 
-    async def execute() -> FixPreparationResultV1:  # noqa: PLR0912
+    async def execute() -> FixPreparationResultV1:  # noqa: PLR0911 - explicit terminal outcomes
         nonlocal checks, verifier, repair_turns, review_turns
         if cancelled():
             raise PreparationCancelledError
@@ -520,10 +492,10 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
                     gaps=record.repair.gaps,
                 )
             if not manifest:
-                record.repair.gaps.append(
-                    "No changed files were found. Implement the fix and regression test."
+                return await finish(
+                    PreparationState.BLOCKED,
+                    "Repair completed without a deliverable patch.",
                 )
-                continue
             if cancelled():
                 raise PreparationCancelledError
             # Review can investigate even incomplete validation and run the missing checks itself.
@@ -545,21 +517,20 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
                 continue
             if verifier.decision is not VerificationDecision.VERIFIED:
                 return await finish(PreparationState.BLOCKED, verifier.summary, gaps=verifier.gaps)
-            gaps = validation_gaps(checks, record.repair.source_digest, request.checks)
+            # Test selection, failures, reruns and coverage belong to the reviewer.
+            # Only the artifact identity is checked here; it never starts another repair.
             if (
                 record.workspace_digest != await _workspace_digest(workspace)
                 or verifier.source_digest != record.repair.source_digest
             ):
-                gaps.append(
-                    "The deliverable changed during review. Inspect the diff, clean up temporary "
-                    "files, and rerun affected checks before requesting review again."
+                return await finish(
+                    PreparationState.BLOCKED,
+                    "The deliverable changed during review; "
+                    "the approved patch cannot be delivered.",
                 )
-            if gaps:
-                record.repair.gaps.extend(gaps)
-                continue
             return await finish(
                 PreparationState.READY,
-                "Required tests passed and independent review approved the draft PR.",
+                "Independent review approved the draft PR. See the review for validation results.",
             )
         return await finish(
             PreparationState.BLOCKED,
