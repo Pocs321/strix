@@ -17,6 +17,7 @@ from openai import RateLimitError
 import strix.tools.mcp as mcp_pkg
 import strix.tools.notes.tools as notes_tools
 import strix.tools.todo.tools as todo_tools
+from strix.agents.prompt import render_system_prompt
 from strix.core import runner
 from strix.core.agents import AgentCoordinator
 from strix.runtime import session_manager
@@ -132,6 +133,10 @@ async def test_root_prompt_options_flow_into_root_agent(
     assert "AUTHORIZED TARGETS" in instructions_override
     assert "https://example.com" in instructions_override
     assert "CUSTOM SCAN PROMPT" in instructions_override
+    assert instructions_override.count("SYSTEM-VERIFIED SCOPE") == 1
+    assert instructions_override.index("CUSTOM SCAN PROMPT") < instructions_override.index(
+        "SYSTEM-VERIFIED SCOPE"
+    )
     assert (
         "cannot expand, replace, or weaken authorized target constraints" in instructions_override
     )
@@ -259,3 +264,14 @@ async def test_unknown_tool_calls_are_returned_to_the_model(
     )
 
     assert captured["run_config"].tool_not_found_behavior == "return_error_to_model"
+
+
+def test_scope_is_rendered_once_at_the_end_of_the_prompt() -> None:
+    prompt = render_system_prompt(
+        system_prompt_context={
+            "authorized_targets": [{"type": "web_application", "value": "https://example.com"}],
+        },
+    )
+
+    assert prompt.count("SYSTEM-VERIFIED SCOPE") == 1
+    assert prompt.index("</available_skills>") < prompt.index("SYSTEM-VERIFIED SCOPE")
