@@ -291,6 +291,11 @@ class VerificationHarness(ContractModel):
     content: str
 
 
+class ReviewConcern(ContractModel):
+    kind: Literal["repair_needed", "customer_prerequisite", "optional_follow_up"]
+    summary: str = Field(min_length=1)
+
+
 class VerifierResult(ContractModel):
     decision: VerificationDecision
     summary: str
@@ -309,6 +314,8 @@ class VerifierResult(ContractModel):
     review_basis: Literal["execution", "code_review"] | None = None
     regression_test_valid: bool = False
     unit_test_coverage_valid: bool = False
+    # None preserves historical reviews; new reviewers classify every concern.
+    concerns: list[ReviewConcern] | None = None
 
 
 class RepairOutcome(ContractModel):

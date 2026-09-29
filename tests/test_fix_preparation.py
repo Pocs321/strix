@@ -25,6 +25,7 @@ from strix.fix.contracts import (
     RepairStatus,
     RepositoryTestPlan,
     ReproductionSpec,
+    ReviewConcern,
     SourceIdentity,
     SourceIdentityKind,
     VerificationDecision,
@@ -93,7 +94,11 @@ def _workspace(tmp_path: Path) -> tuple[Path, str]:
     _git(workspace, "config", "user.email", "test@example.com")
     _git(workspace, "config", "user.name", "Test")
     (workspace / "app.py").write_text("def result():\n    return 'unsafe'\n", encoding="utf-8")
-    _git(workspace, "add", "app.py")
+    (workspace / "test_existing.py").write_text(
+        "import unittest\nfrom app import result\nclass Existing(unittest.TestCase):\n"
+        "    def test_result_type(self): self.assertIsInstance(result(), str)\n"
+    )
+    _git(workspace, "add", "app.py", "test_existing.py")
     _git(workspace, "commit", "-m", "initial")
     return workspace, _git(workspace, "rev-parse", "HEAD")
 
@@ -179,7 +184,11 @@ async def _noop_repair(
             regression_test=CommandSpec(
                 name="regression", argv=[sys.executable, "-m", "unittest", "test_app"]
             ),
-            no_unit_tests_reason="The fixture has no prior unit suite.",
+            unit_tests=[
+                CommandSpec(
+                    name="existing suite", argv=[sys.executable, "-m", "unittest", "test_existing"]
+                )
+            ],
         ),
         status=RepairStatus.COMPLETE,
         summary="The repository fix is ready for independent evaluation.",
@@ -584,6 +593,90 @@ async def test_exhausted_repair_can_be_validated_from_saved_work(tmp_path: Path)
         _request(_candidate(commit)), workspace, repair=repair, verify=_verified
     )
     assert result.state is PreparationState.READY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recover", [True, False])
+async def test_empty_completion_gets_actionable_bounded_retry(
+    tmp_path: Path, recover: bool
+) -> None:
+    workspace, commit = _workspace(tmp_path)
+
+    async def repair(context, checks):
+        if context.attempt == 2:
+            assert "No changed files" in context.feedback[0].repair.gaps[0]
+            if recover:
+                return await _noop_repair(context, checks)
+        return RepairOutcome(status=RepairStatus.COMPLETE, summary="Claimed completion")
+
+    result = await prepare_fix(
+        _request(_candidate(commit)), workspace, repair=repair, verify=_verified
+    )
+    assert result.attempts == 2
+    assert result.state is (PreparationState.READY if recover else PreparationState.FAILED)
+    if not recover:
+        assert not result.final_file_manifest
+        assert "No changed files" in result.gaps[0]
+
+
+@pytest.mark.asyncio
+async def test_missing_customer_suite_cannot_be_waived_with_an_explanation(tmp_path: Path) -> None:
+    workspace, commit = _workspace(tmp_path)
+
+    async def repair(context, checks):
+        outcome = await _noop_repair(context, checks)
+        outcome.test_plan.unit_tests = []
+        outcome.test_plan.no_unit_tests_reason = "No existing suite was found."
+        return outcome
+
+    async def review(*_args):
+        pytest.fail("A reviewer cannot waive required customer unit tests")
+
+    result = await prepare_fix(
+        _request(_candidate(commit)), workspace, repair=repair, verify=review
+    )
+    assert result.state is PreparationState.BLOCKED
+    assert result.final_file_manifest
+    assert any("existing unit-test suite" in gap for gap in result.gaps)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["repair_needed", "customer_prerequisite", "optional_follow_up"])
+async def test_controller_derives_review_action_and_resolves_repair_observations(
+    tmp_path: Path, kind: str
+) -> None:
+    workspace, commit = _workspace(tmp_path)
+
+    async def repair(context, checks):
+        outcome = await _noop_repair(context, checks)
+        outcome.gaps = ["An additional deployment check could help."]
+        if context.attempt == 2:
+            assert context.feedback[0].verifier.gaps == ["Inspect the companion configuration."]
+        return outcome
+
+    async def review(context, checks):
+        result = await _verified(context, checks)
+        # The controller must derive the outcome even if the proposed decision says verified.
+        result.concerns = (
+            []
+            if context.attempt == 2
+            else [ReviewConcern(kind=kind, summary="Inspect the companion configuration.")]
+        )
+        return result
+
+    result = await prepare_fix(
+        _request(_candidate(commit)), workspace, repair=repair, verify=review
+    )
+    assert result.attempts == (2 if kind == "repair_needed" else 1)
+    if kind == "customer_prerequisite":
+        assert result.state is PreparationState.BLOCKED
+        assert result.blocker.user_action == "Inspect the companion configuration."
+    else:
+        assert result.state is PreparationState.READY
+        assert not result.gaps
+        assert not result.verifier.gaps
+        if kind == "optional_follow_up":
+            assert result.verifier.notes == ["Inspect the companion configuration."]
 
 
 @pytest.mark.asyncio

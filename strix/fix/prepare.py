@@ -421,6 +421,10 @@ def _verification_passes(checks: list[CheckResult], verifier: VerifierResult) ->
         and any(
             item.purpose == "regression" and item.status is CheckStatus.PASSED for item in checks
         )
+        and any(
+            item.purpose == "unit" and item.required and item.status is CheckStatus.PASSED
+            for item in checks
+        )
         and len({item.environment_id for item in checks if item.environment_id}) <= 1
         and len({item.source_digest for item in checks if item.source_digest}) <= 1
         and verifier.decision is VerificationDecision.VERIFIED
@@ -439,7 +443,49 @@ def _test_plan_gaps(repair: RepairOutcome, manifest: list[FileManifestEntry]) ->
         return ["The repair must supply a regression test and the repository unit-test commands."]
     changed = {entry.path for entry in manifest if entry.operation != "delete"}
     missing = [path for path in plan.regression_files if path not in changed]
-    return [f"Regression test must be added or updated in the patch: {path}" for path in missing]
+    gaps = [f"Regression test must be added or updated in the patch: {path}" for path in missing]
+    if not plan.unit_tests:
+        gaps.append("Supply the customer's existing unit-test suite for the affected code.")
+        if plan.no_unit_tests_reason:
+            gaps.append(plan.no_unit_tests_reason)
+    return gaps
+
+
+def _resolve_review(verifier: VerifierResult) -> VerifierResult:
+    """Derive the outcome from actionable concerns, retaining legacy record support."""
+    if verifier.concerns is None:
+        return verifier
+    repairs = [c.summary for c in verifier.concerns if c.kind == "repair_needed"]
+    prerequisites = [c.summary for c in verifier.concerns if c.kind == "customer_prerequisite"]
+    notes = [c.summary for c in verifier.concerns if c.kind == "optional_follow_up"]
+    approved = (
+        verifier.security_invariant_closed
+        and verifier.regression_test_valid
+        and verifier.unit_test_coverage_valid
+    )
+    decision = (
+        VerificationDecision.REJECTED
+        if repairs
+        else VerificationDecision.INCONCLUSIVE
+        if prerequisites or not approved
+        else VerificationDecision.VERIFIED
+    )
+    return verifier.model_copy(
+        update={
+            "decision": decision,
+            "repairable": bool(repairs),
+            "gaps": [*repairs, *prerequisites],
+            "notes": list(dict.fromkeys([*verifier.notes, *notes])),
+            "blocker": PreparationBlocker(
+                kind=BlockerKind.EXTERNAL_CONFIGURATION,
+                summary="A required customer prerequisite is missing.",
+                user_action="\n".join(prerequisites),
+                details=prerequisites,
+            )
+            if prerequisites
+            else None,
+        }
+    )
 
 
 def _test_commands(repair: RepairOutcome) -> list[CommandSpec]:
@@ -562,6 +608,10 @@ async def prepare_fix(  # noqa: PLR0915
             checks = record.checks
             record.workspace_digest = await _workspace_digest(workspace)
             manifest, _, _ = await build_git_manifest(workspace)
+            can_retry = (
+                attempt < resolved_policy.max_repair_attempts
+                and record.repair.status is not RepairStatus.BLOCKED
+            )
             if not manifest:
                 if record.repair.blocker:
                     return await finish(
@@ -570,14 +620,18 @@ async def prepare_fix(  # noqa: PLR0915
                         blocker=record.repair.blocker,
                         gaps=record.repair.gaps,
                     )
+                record.repair.gaps.append(
+                    "No changed files were found. Use the file tools to implement the fix and "
+                    "regression test, then submit their validation commands."
+                )
+                if can_retry:
+                    continue
                 return await finish(
-                    PreparationState.FAILED, "The repair did not change repository source."
+                    PreparationState.FAILED,
+                    "The repair did not change repository source.",
+                    gaps=record.repair.gaps,
                 )
             await manifest_builder(workspace)  # Save the patch before any test can fail.
-            can_retry = (
-                attempt < resolved_policy.max_repair_attempts
-                and record.repair.status is not RepairStatus.BLOCKED
-            )
             plan_gaps = _test_plan_gaps(record.repair, manifest)
             if plan_gaps:
                 record.repair.gaps = list(dict.fromkeys([*record.repair.gaps, *plan_gaps]))
@@ -585,7 +639,7 @@ async def prepare_fix(  # noqa: PLR0915
                     continue
                 return await finish(
                     PreparationState.BLOCKED,
-                    "The patch is saved, but its regression-test handoff is incomplete.",
+                    "The patch is saved, but its required test handoff is incomplete.",
                     blocker=record.repair.blocker,
                     gaps=record.repair.gaps,
                 )
@@ -625,7 +679,7 @@ async def prepare_fix(  # noqa: PLR0915
                     gaps=[f"{item.name}: {item.status}" for item in failed],
                 )
             # Review the exact repair and its native test results. No second harness is required.
-            verifier = await verify(context, checks)
+            verifier = _resolve_review(await verify(context, checks))
             record.verifier = verifier
             if record.workspace_digest != await _workspace_digest(workspace):
                 return await finish(
@@ -640,6 +694,13 @@ async def prepare_fix(  # noqa: PLR0915
                     "The independent reviewer found a repair or regression-test defect.",
                     gaps=verifier.gaps,
                 )
+            if verifier.blocker:
+                return await finish(
+                    PreparationState.BLOCKED,
+                    verifier.blocker.summary,
+                    blocker=verifier.blocker,
+                    gaps=verifier.gaps,
+                )
             if record.repair.status is RepairStatus.BLOCKED:
                 return await finish(
                     PreparationState.BLOCKED,
@@ -647,12 +708,15 @@ async def prepare_fix(  # noqa: PLR0915
                     blocker=record.repair.blocker,
                     gaps=record.repair.gaps,
                 )
-            if _verification_passes(checks, verifier) and not record.repair.gaps:
+            # Typed review explicitly resolves the repair agent's observations. Historical
+            # free-text gaps remain blocking until a reviewer classifies them.
+            repair_gaps = record.repair.gaps if verifier.concerns is None else []
+            if _verification_passes(checks, verifier) and not repair_gaps:
                 return await finish(
                     PreparationState.READY,
                     "Tests and required checks passed; independent review approved a draft PR.",
                 )
-            gaps = list(dict.fromkeys([*record.repair.gaps, *verifier.gaps]))
+            gaps = list(dict.fromkeys([*repair_gaps, *verifier.gaps]))
             if not gaps:
                 gaps = ["Independent review could not confirm the repair and native-test coverage."]
             return await finish(
