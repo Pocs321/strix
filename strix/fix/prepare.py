@@ -645,14 +645,9 @@ async def prepare_fix(  # noqa: PLR0915
                     "The independent security verifier found a repair defect.",
                     gaps=gaps,
                 )
-            if record.repair.status is not RepairStatus.COMPLETE:
-                state = (
-                    PreparationState.BLOCKED
-                    if record.repair.status is RepairStatus.BLOCKED
-                    else PreparationState.FAILED
-                )
+            if record.repair.status is RepairStatus.BLOCKED:
                 return await finish(
-                    state,
+                    PreparationState.BLOCKED,
                     record.repair.summary,
                     blocker=record.repair.blocker,
                     gaps=gaps,

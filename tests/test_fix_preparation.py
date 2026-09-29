@@ -15,6 +15,7 @@ from strix.fix.contracts import (
     CheckResult,
     CheckStatus,
     CommandSpec,
+    FileManifestEntry,
     FixCandidateV1,
     FixEdit,
     FixPreparationRequestV1,
@@ -618,7 +619,9 @@ async def test_security_blocker_stops_without_repair_retry(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_budget_exhaustion_retains_partial_evidence_and_turns(tmp_path: Path) -> None:
+async def test_budget_exhaustion_can_be_approved_by_independent_evidence(
+    tmp_path: Path,
+) -> None:
     workspace, commit = _workspace(tmp_path)
     verifier_called = False
 
@@ -651,10 +654,52 @@ async def test_budget_exhaustion_retains_partial_evidence_and_turns(tmp_path: Pa
         verify=verify,
     )
 
-    assert result.state is PreparationState.FAILED
+    assert result.state is PreparationState.READY
     assert verifier_called is True
     assert result.attempt_history[0].repair.turns_used == 40
     assert result.changed_files == ["app.py"]
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_with_incomplete_evidence_is_blocked(tmp_path: Path) -> None:
+    workspace, commit = _workspace(tmp_path)
+
+    async def exhausted(
+        context: PreparationContext,
+        _checks: list[CheckResult],
+    ) -> RepairOutcome:
+        (context.workspace / "app.py").write_text(
+            "def result():\n    return 'safe'\n",
+            encoding="utf-8",
+        )
+        return RepairOutcome(
+            status=RepairStatus.BUDGET_EXHAUSTED,
+            summary="The repair hit its emergency turn ceiling after editing the patch.",
+            turns_used=40,
+        )
+
+    async def inconclusive(
+        _context: PreparationContext,
+        _checks: list[CheckResult],
+    ) -> VerifierResult:
+        return VerifierResult(
+            decision=VerificationDecision.INCONCLUSIVE,
+            summary="Production configuration could not be verified.",
+            security_invariant_closed=False,
+            gaps=["The production environment value is unavailable."],
+        )
+
+    result = await prepare_fix(
+        _request(_candidate(commit)),
+        workspace,
+        repair=exhausted,
+        verify=inconclusive,
+    )
+
+    assert result.state is PreparationState.BLOCKED
+    assert result.blocker is not None
+    assert result.blocker.kind is BlockerKind.SECURITY_EVIDENCE
+    assert result.attempt_history[0].repair.turns_used == 40
 
 
 @pytest.mark.asyncio
@@ -893,7 +938,6 @@ async def test_run_command_blocks_egress_when_network_not_allowed(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_manifest_patch_includes_untracked_companion_file(tmp_path: Path) -> None:
-
     workspace, _ = _workspace(tmp_path)
     (workspace / "companion.py").write_text("guard = True\n")
     manifest, _, _ = await build_git_manifest(workspace)
@@ -904,7 +948,6 @@ async def test_manifest_patch_includes_untracked_companion_file(tmp_path: Path) 
 
 
 def test_baseline_comparison_normalizes_only_known_checkout_roots() -> None:
-
     result = CheckResult(
         name="typecheck",
         argv=["tsc"],
@@ -929,13 +972,16 @@ async def test_check_planner_sees_companion_files_and_preserves_partial_evidence
     tmp_path: Path,
 ) -> None:
     workspace, commit = _workspace(tmp_path)
-    seen = []
+    seen: list[str] = []
 
     async def repair(context: PreparationContext, checks: list[CheckResult]) -> RepairOutcome:
         (workspace / "companion.py").write_text("guard = True\n")
         return await _noop_repair(context, checks)
 
-    async def planner(_context: PreparationContext, manifest: list) -> list[CommandSpec]:
+    async def planner(
+        _context: PreparationContext,
+        manifest: list[FileManifestEntry],
+    ) -> list[CommandSpec]:
         seen.extend(item.path for item in manifest)
         return [CommandSpec(name="native tests", argv=["missing-runtime", "test"])]
 
@@ -964,7 +1010,6 @@ async def test_check_planner_sees_companion_files_and_preserves_partial_evidence
 
 
 def test_skipped_check_and_missing_runtime_are_not_passing_evidence() -> None:
-
     assert command_status(0, "Skipping to avoid parser lock")[0] is CheckStatus.SKIPPED
     assert command_status(127, "bun: command not found")[0] is CheckStatus.UNAVAILABLE
     assert (
