@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from strix.config.settings import DEFAULT_MAX_TURNS
+
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -133,7 +135,7 @@ class CommandSpec(ContractModel):
     required: bool = True
     timeout_seconds: int = Field(default=300, ge=1, le=3600)
     cwd: str = "."
-    purpose: Literal["quality", "regression", "unit"] = "quality"
+    purpose: Literal["quality", "regression", "unit", "security"] = "quality"
 
     _relative_cwd = field_validator("cwd")(_validate_relative_path)
 
@@ -151,7 +153,7 @@ class ReproductionSpec(ContractModel):
 
 
 class RepositoryTestPlan(ContractModel):
-    """The repair agent's native tests, rerun by the controller before review."""
+    """Historical native-test handoff; agent-driven runs record commands directly."""
 
     regression_test: CommandSpec
     regression_files: list[str] = Field(min_length=1)
@@ -218,8 +220,11 @@ class FixPreparationRequestV1(ContractModel):
     repository_id: str | None = None
     candidate: FixCandidateV1
     checks: list[CommandSpec] = []
-    max_repair_attempts: int = Field(default=2, ge=1, le=2)
-    timeout_seconds: int = Field(default=1800, ge=30, le=14400)
+    # Accepted for old callers; the agent loop is bounded by turns/time instead.
+    max_repair_attempts: int | None = Field(default=None, ge=1)
+    max_agent_turns: int = Field(default=DEFAULT_MAX_TURNS, ge=1, le=10000)
+    timeout_seconds: int = Field(default=7200, ge=30, le=14400)
+    max_budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     network_allowed: bool = False
     credentials_allowed: list[str] = []
 
@@ -244,7 +249,7 @@ class CheckResult(ContractModel):
     baseline_workspace_root: str | None = None
     source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     environment_id: str | None = None
-    purpose: Literal["quality", "regression", "unit"] = "quality"
+    purpose: Literal["quality", "regression", "unit", "security"] = "quality"
     tests_passed: int | None = Field(default=None, ge=0)
 
 
@@ -316,6 +321,8 @@ class VerifierResult(ContractModel):
     unit_test_coverage_valid: bool = False
     # None preserves historical reviews; new reviewers classify every concern.
     concerns: list[ReviewConcern] | None = None
+    source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    turns_used: int = Field(default=0, ge=0)
 
 
 class RepairOutcome(ContractModel):
@@ -328,6 +335,7 @@ class RepairOutcome(ContractModel):
     checks: list[CommandSpec] = []
     command_results: list[CheckResult] = []
     test_plan: RepositoryTestPlan | None = None
+    source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class FixPreparationAttempt(ContractModel):
@@ -352,7 +360,8 @@ class FileManifestEntry(ContractModel):
 class FixPreparationResultV1(ContractModel):
     version: Literal["1"] = "1"
     # Absent on historical records; keep their stronger, paired-proof interpretation.
-    validation_mode: Literal["paired", "native_tests"] = "paired"
+    validation_mode: Literal["paired", "native_tests", "agent_review"] = "paired"
+    prepared_source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     state: PreparationState
     stop_reason: str
     source_identity: SourceIdentity | None

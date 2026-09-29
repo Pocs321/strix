@@ -32,8 +32,7 @@ from strix.fix.contracts import (
     VerificationDecision,
     VerifierResult,
 )
-from strix.fix.evidence import command_status, record_test_execution
-from strix.fix.locations import AnchorStatus, anchor_location
+from strix.fix.evidence import command_status
 
 
 class PreparationCancelledError(RuntimeError):
@@ -47,13 +46,8 @@ CancellationCheck = Callable[[], bool]
 
 @dataclass(slots=True)
 class PreparationPolicy:
-    max_repair_attempts: int = 2
-    timeout_seconds: int = 1800
+    timeout_seconds: int = 7200
     max_output_chars: int = 20000
-
-    def __post_init__(self) -> None:
-        if not 1 <= self.max_repair_attempts <= 2:
-            raise ValueError("max_repair_attempts must be between 1 and 2")
 
 
 @dataclass(slots=True)
@@ -74,7 +68,7 @@ IndependentVerifier = Callable[
     Awaitable[VerifierResult],
 ]
 SourceVerifier = Callable[[PreparationContext], Awaitable[bool]]
-CheckPlanner = Callable[[PreparationContext, list[FileManifestEntry]], Awaitable[list[CommandSpec]]]
+EvidenceReader = Callable[[], Awaitable[list[CheckResult]]]
 
 
 _COMMAND_ENV_ALLOWLIST = frozenset(
@@ -378,7 +372,10 @@ def _result(
 ) -> FixPreparationResultV1:
     return FixPreparationResultV1(
         state=state,
-        validation_mode="native_tests",
+        validation_mode="agent_review",
+        prepared_source_digest=(
+            context.feedback[-1].repair.source_digest if context.feedback else None
+        ),
         test_plan=context.feedback[-1].repair.test_plan if context.feedback else None,
         stop_reason=reason,
         source_identity=context.candidate.source_identity,
@@ -408,128 +405,53 @@ def _repair_outcome(value: RepairOutcome | None) -> RepairOutcome:
     )
 
 
-def _required_checks_pass(checks: list[CheckResult]) -> bool:
-    required = [result for result in checks if result.required]
-    return bool(required) and all(
-        result.status is CheckStatus.PASSED and result.exit_code == 0 for result in required
-    )
-
-
-def _verification_passes(checks: list[CheckResult], verifier: VerifierResult) -> bool:
-    return (
-        _required_checks_pass(checks)
-        and any(
-            item.purpose == "regression" and item.status is CheckStatus.PASSED for item in checks
-        )
-        and any(
-            item.purpose == "unit" and item.required and item.status is CheckStatus.PASSED
+def validation_gaps(
+    checks: list[CheckResult], source_digest: str | None, requested: list[CommandSpec]
+) -> list[str]:
+    """Check execution facts only; agents judge coverage and the security fix."""
+    gaps: list[str] = []
+    if not source_digest:
+        gaps.append("No source digest was recorded for the prepared patch.")
+    for purpose in ("regression", "unit"):
+        if not any(item.purpose == purpose and item.required for item in checks):
+            gaps.append(f"Run and record the required {purpose} tests.")  # noqa: PERF401
+    for item in checks:
+        if not item.required:
+            continue
+        if item.source_digest != source_digest or not item.environment_id:
+            gaps.append(f"Rerun {item.name}: its results are not for the current patch.")
+        elif item.status is not CheckStatus.PASSED or item.exit_code != 0 or item.tests_passed == 0:
+            gaps.append(f"Resolve and rerun {item.name}: {item.status}.")
+    if len({item.environment_id for item in checks if item.required}) > 1:
+        gaps.append("Required checks refer to different execution environments.")
+    for command in requested:
+        if command.required and not any(
+            item.required and item.argv == command.argv and item.cwd == command.cwd
             for item in checks
-        )
-        and len({item.environment_id for item in checks if item.environment_id}) <= 1
-        and len({item.source_digest for item in checks if item.source_digest}) <= 1
-        and verifier.decision is VerificationDecision.VERIFIED
-        and verifier.security_invariant_closed
-        and verifier.regression_test_valid
-        and verifier.unit_test_coverage_valid
-        and verifier.review_basis in {"execution", "code_review"}
-        and not verifier.gaps
-        and verifier.blocker is None
-    )
-
-
-def _test_plan_gaps(repair: RepairOutcome, manifest: list[FileManifestEntry]) -> list[str]:
-    plan = repair.test_plan
-    if plan is None:
-        return ["The repair must supply a regression test and the repository unit-test commands."]
-    changed = {entry.path for entry in manifest if entry.operation != "delete"}
-    missing = [path for path in plan.regression_files if path not in changed]
-    gaps = [f"Regression test must be added or updated in the patch: {path}" for path in missing]
-    if not plan.unit_tests:
-        gaps.append("Supply the customer's existing unit-test suite for the affected code.")
-        if plan.no_unit_tests_reason:
-            gaps.append(plan.no_unit_tests_reason)
+        ):
+            gaps.append(f"Run the requested check: {command.name}.")  # noqa: PERF401
     return gaps
 
 
-def _resolve_review(verifier: VerifierResult) -> VerifierResult:
-    """Derive the outcome from actionable concerns, retaining legacy record support."""
-    if verifier.concerns is None:
-        return verifier
-    repairs = [c.summary for c in verifier.concerns if c.kind == "repair_needed"]
-    prerequisites = [c.summary for c in verifier.concerns if c.kind == "customer_prerequisite"]
-    notes = [c.summary for c in verifier.concerns if c.kind == "optional_follow_up"]
-    approved = (
-        verifier.security_invariant_closed
-        and verifier.regression_test_valid
-        and verifier.unit_test_coverage_valid
-    )
-    decision = (
-        VerificationDecision.REJECTED
-        if repairs
-        else VerificationDecision.INCONCLUSIVE
-        if prerequisites or not approved
-        else VerificationDecision.VERIFIED
-    )
-    return verifier.model_copy(
-        update={
-            "decision": decision,
-            "repairable": bool(repairs),
-            "gaps": [*repairs, *prerequisites],
-            "notes": list(dict.fromkeys([*verifier.notes, *notes])),
-            "blocker": PreparationBlocker(
-                kind=BlockerKind.EXTERNAL_CONFIGURATION,
-                summary="A required customer prerequisite is missing.",
-                user_action="\n".join(prerequisites),
-                details=prerequisites,
-            )
-            if prerequisites
-            else None,
-        }
-    )
-
-
-def _test_commands(repair: RepairOutcome) -> list[CommandSpec]:
-    plan = repair.test_plan
-    if plan is None:
-        return []
-    return [
-        plan.regression_test.model_copy(update={"purpose": "regression", "required": True}),
-        *(
-            item.model_copy(update={"purpose": "unit", "required": True})
-            for item in plan.unit_tests
-        ),
-    ]
-
-
-async def prepare_fix(  # noqa: PLR0915
+async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
     request: FixPreparationRequestV1,
     workspace: Path,
     *,
     repair: RepairAgent,
     verify: IndependentVerifier,
-    command_runner: CommandRunner = run_command,
     manifest_builder: ManifestBuilder = build_git_manifest,
     source_verifier: SourceVerifier = _verify_source,
-    check_planner: CheckPlanner | None = None,
+    evidence_reader: EvidenceReader | None = None,
     cancelled: CancellationCheck = lambda: False,
     policy: PreparationPolicy | None = None,
 ) -> FixPreparationResultV1:
+    """Run repair/review conversations; agents own setup, tests and corrections."""
     started = time.monotonic()
-    resolved_policy = policy or PreparationPolicy(
-        max_repair_attempts=request.max_repair_attempts,
-        timeout_seconds=request.timeout_seconds,
-    )
+    resolved_policy = policy or PreparationPolicy(timeout_seconds=request.timeout_seconds)
     context = PreparationContext(request=request, workspace=workspace, candidate=request.candidate)
-    runner = command_runner
-    if runner is run_command:
-        runner = functools.partial(
-            run_command,
-            credentials_allowed=request.credentials_allowed,
-            network_allowed=request.network_allowed,
-        )
     checks: list[CheckResult] = []
     verifier: VerifierResult | None = None
-    reproduction: CheckResult | None = None
+    repair_turns = review_turns = 0
 
     async def finish(
         state: PreparationState,
@@ -538,201 +460,110 @@ async def prepare_fix(  # noqa: PLR0915
         blocker: PreparationBlocker | None = None,
         gaps: list[str] | None = None,
     ) -> FixPreparationResultV1:
+        nonlocal checks
+        if evidence_reader:
+            checks = await evidence_reader()
         manifest, summary, artifact = await manifest_builder(workspace)
-        retained_verifier = verifier or (
-            context.feedback[-1].verifier if context.feedback else None
-        )
         return _result(
             context,
             state=state,
             reason=reason,
             started=started,
             checks=checks,
-            verifier=retained_verifier,
-            reproduction=reproduction,
+            verifier=verifier,
             manifest=manifest,
             diff_summary=summary,
             artifact_ref=artifact,
             attempt_history=context.feedback,
             blocker=blocker,
             gaps=gaps,
+            reproduction=next((c for c in checks if c.purpose == "regression"), None),
         )
 
-    async def execute() -> FixPreparationResultV1:  # noqa: PLR0911, PLR0912, PLR0915
-        nonlocal checks, verifier, reproduction
-        blocker: PreparationBlocker | None
+    async def execute() -> FixPreparationResultV1:  # noqa: PLR0912
+        nonlocal checks, verifier, repair_turns, review_turns
         if cancelled():
             raise PreparationCancelledError
         if not await source_verifier(context):
-            blocker = PreparationBlocker(
-                kind=BlockerKind.SOURCE,
-                summary="The repository no longer matches the finding source.",
-                user_action="Refresh the finding against the current repository revision.",
+            return await finish(
+                PreparationState.STALE,
+                "The repository no longer matches the finding source.",
+                blocker=PreparationBlocker(
+                    kind=BlockerKind.SOURCE,
+                    summary="The repository no longer matches the finding source.",
+                    user_action="Refresh the finding against the current repository revision.",
+                ),
             )
-            return _result(
-                context,
-                state=PreparationState.STALE,
-                reason=blocker.summary,
-                blocker=blocker,
-                started=started,
-            )
-        anchors = [
-            anchor_location(workspace, location, exact_source=True)
-            for location in context.candidate.finding_locations
-        ]
-        unresolved = [item for item in anchors if item.status is not AnchorStatus.UNIQUE]
-        if unresolved:
-            blocker = PreparationBlocker(
-                kind=BlockerKind.SOURCE,
-                summary="The reported finding locations could not be resolved uniquely.",
-                user_action="Refresh the finding or identify the affected source location.",
-                details=[f"{item.location.file}: {item.status}" for item in unresolved],
-            )
-            return await finish(PreparationState.BLOCKED, blocker.summary, blocker=blocker)
-        context.candidate = context.candidate.model_copy(
-            update={"finding_locations": [item.location for item in anchors]}
-        )
-        for attempt in range(1, resolved_policy.max_repair_attempts + 1):
-            context.attempt = attempt
+        # Location/snippet interpretation belongs to repair. Exact source identity is checked above.
+        while repair_turns < request.max_agent_turns and review_turns < request.max_agent_turns:
             if cancelled():
                 raise PreparationCancelledError
+            context.attempt += 1
             verifier = None
-            reproduction = None
             record = FixPreparationAttempt(
-                attempt=attempt,
+                attempt=context.attempt,
                 repair=RepairOutcome(status=RepairStatus.INCOMPLETE, summary="Repair started."),
                 workspace_digest=await _workspace_digest(workspace),
             )
             context.feedback.append(record)
             record.repair = _repair_outcome(await repair(context, checks))
-            checks = record.checks
+            repair_turns += max(1, record.repair.turns_used)
+            checks = await evidence_reader() if evidence_reader else record.repair.command_results
+            record.checks = list(checks)
             record.workspace_digest = await _workspace_digest(workspace)
-            manifest, _, _ = await build_git_manifest(workspace)
-            can_retry = (
-                attempt < resolved_policy.max_repair_attempts
-                and record.repair.status is not RepairStatus.BLOCKED
-            )
-            if not manifest:
-                if record.repair.blocker:
-                    return await finish(
-                        PreparationState.BLOCKED,
-                        record.repair.summary,
-                        blocker=record.repair.blocker,
-                        gaps=record.repair.gaps,
-                    )
-                record.repair.gaps.append(
-                    "No changed files were found. Use the file tools to implement the fix and "
-                    "regression test, then submit their validation commands."
-                )
-                if can_retry:
-                    continue
-                return await finish(
-                    PreparationState.FAILED,
-                    "The repair did not change repository source.",
-                    gaps=record.repair.gaps,
-                )
-            await manifest_builder(workspace)  # Save the patch before any test can fail.
-            plan_gaps = _test_plan_gaps(record.repair, manifest)
-            if plan_gaps:
-                record.repair.gaps = list(dict.fromkeys([*record.repair.gaps, *plan_gaps]))
-                if can_retry:
-                    continue
-                return await finish(
-                    PreparationState.BLOCKED,
-                    "The patch is saved, but its required test handoff is incomplete.",
-                    blocker=record.repair.blocker,
-                    gaps=record.repair.gaps,
-                )
-            additional = await check_planner(context, manifest) if check_planner else request.checks
-            planned = [*_test_commands(record.repair), *additional]
-            unique: dict[tuple[str, tuple[str, ...], str], CommandSpec] = {}
-            for command in planned:
-                key = (command.purpose, tuple(command.argv), command.cwd)
-                previous = unique.get(key)
-                unique[key] = command.model_copy(
-                    update={"required": command.required or bool(previous and previous.required)}
-                )
-            checks = record.checks
-            for command in unique.values():
-                if cancelled():
-                    raise PreparationCancelledError
-                checks.append(record_test_execution(await runner(workspace, command), command))
-            reproduction = next((item for item in checks if item.purpose == "regression"), None)
-            record.security_reproduction = reproduction
-            failed = [
-                item
-                for item in checks
-                if item.required and (item.status is not CheckStatus.PASSED or item.exit_code != 0)
-            ]
-            if failed:
-                if can_retry:
-                    continue
-                return await finish(
-                    PreparationState.BLOCKED,
-                    "The patch is saved, but required tests or checks have not passed.",
-                    blocker=PreparationBlocker(
-                        kind=BlockerKind.VERIFICATION_RUNTIME,
-                        summary="Required tests or checks have not passed.",
-                        user_action="Review the recorded failures and retry after resolving them.",
-                        details=[f"{item.name}: {item.status}" for item in failed],
-                    ),
-                    gaps=[f"{item.name}: {item.status}" for item in failed],
-                )
-            # Review the exact repair and its native test results. No second harness is required.
-            verifier = _resolve_review(await verify(context, checks))
-            record.verifier = verifier
-            if record.workspace_digest != await _workspace_digest(workspace):
-                return await finish(
-                    PreparationState.FAILED,
-                    "Review changed the prepared source; validation must be rerun.",
-                )
-            if verifier.decision is VerificationDecision.REJECTED:
-                if verifier.repairable and can_retry:
-                    continue
-                return await finish(
-                    PreparationState.FAILED,
-                    "The independent reviewer found a repair or regression-test defect.",
-                    gaps=verifier.gaps,
-                )
-            if verifier.blocker:
-                return await finish(
-                    PreparationState.BLOCKED,
-                    verifier.blocker.summary,
-                    blocker=verifier.blocker,
-                    gaps=verifier.gaps,
-                )
-            if record.repair.status is RepairStatus.BLOCKED:
+            manifest, _, _ = await manifest_builder(workspace)
+            if record.repair.status is not RepairStatus.COMPLETE:
                 return await finish(
                     PreparationState.BLOCKED,
                     record.repair.summary,
                     blocker=record.repair.blocker,
                     gaps=record.repair.gaps,
                 )
-            # Typed review explicitly resolves the repair agent's observations. Historical
-            # free-text gaps remain blocking until a reviewer classifies them.
-            repair_gaps = record.repair.gaps if verifier.concerns is None else []
-            if _verification_passes(checks, verifier) and not repair_gaps:
-                return await finish(
-                    PreparationState.READY,
-                    "Tests and required checks passed; independent review approved a draft PR.",
+            if not manifest:
+                record.repair.gaps.append(
+                    "No changed files were found. Implement the fix and regression test."
                 )
-            gaps = list(dict.fromkeys([*repair_gaps, *verifier.gaps]))
-            if not gaps:
-                gaps = ["Independent review could not confirm the repair and native-test coverage."]
+                continue
+            if cancelled():
+                raise PreparationCancelledError
+            # Review can investigate even incomplete validation and run the missing checks itself.
+            verifier = await verify(context, checks)
+            review_turns += max(1, verifier.turns_used)
+            record.verifier = verifier
+            if evidence_reader:
+                checks = await evidence_reader()
+                record.checks = list(checks)
+            if verifier.blocker:
+                return await finish(
+                    PreparationState.BLOCKED,
+                    verifier.summary,
+                    blocker=verifier.blocker,
+                    gaps=verifier.gaps,
+                )
+            if verifier.decision is VerificationDecision.REJECTED:
+                record.repair.gaps.extend(verifier.gaps or [verifier.summary])
+                continue
+            if verifier.decision is not VerificationDecision.VERIFIED:
+                return await finish(PreparationState.BLOCKED, verifier.summary, gaps=verifier.gaps)
+            gaps = validation_gaps(checks, record.repair.source_digest, request.checks)
+            if (
+                record.workspace_digest != await _workspace_digest(workspace)
+                or verifier.source_digest != record.repair.source_digest
+            ):
+                gaps.append(
+                    "The deliverable changed during review. Inspect the diff, clean up temporary "
+                    "files, and rerun affected checks before requesting review again."
+                )
+            if gaps:
+                record.repair.gaps.extend(gaps)
+                continue
             return await finish(
-                PreparationState.BLOCKED,
-                "The patch and test results are saved, but independent review is incomplete.",
-                blocker=verifier.blocker
-                or PreparationBlocker(
-                    kind=BlockerKind.VERIFICATION_RUNTIME,
-                    summary="Independent review is incomplete.",
-                    user_action="Retry review of the saved changes and test evidence.",
-                    details=gaps,
-                ),
-                gaps=gaps,
+                PreparationState.READY,
+                "Required tests passed and independent review approved the draft PR.",
             )
         return await finish(
-            PreparationState.FAILED, "The repair exhausted its configured attempts."
+            PreparationState.BLOCKED,
+            "The agent turn budget was reached; partial work was retained.",
         )
 
     try:
@@ -746,7 +577,6 @@ async def prepare_fix(  # noqa: PLR0915
         logging.getLogger(__name__).exception(
             "Fix preparation failed during attempt %s", context.attempt
         )
-        # Preserve partial work without exposing unredacted exception text.
         return await finish(
             PreparationState.FAILED,
             f"Fix preparation stopped after {type(error).__name__}; partial work was retained.",
