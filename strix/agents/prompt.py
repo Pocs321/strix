@@ -80,8 +80,13 @@ def render_system_prompt(
     is_diff_scoped: bool = False,
     interactive: bool = False,
     system_prompt_context: dict[str, Any] | None = None,
+    include_scope: bool = True,
 ) -> str:
-    """Render the system prompt. Returns empty string on template failure."""
+    """Render the system prompt. Returns empty string on template failure.
+
+    The per-run scope (targets, MCP connections) goes last so the rest of the
+    prompt is an identical prefix across runs and can be served from cache.
+    """
     try:
         prompt_dir = get_strix_resource_path("agents", _PROMPT_DIRNAME)
         loader_dirs = [prompt_dir, *skill_search_dirs()]
@@ -109,6 +114,7 @@ def render_system_prompt(
             interactive=interactive,
             is_root=is_root,
             system_prompt_context=system_prompt_context or {},
+            include_scope=include_scope,
             **skill_content,
         )
     except Exception:
@@ -124,3 +130,16 @@ def render_system_prompt(
             len(rendered),
         )
         return str(rendered)
+
+
+def render_scope_prompt(system_prompt_context: dict[str, Any] | None) -> str:
+    """Render only the per-run scope block that ends the system prompt."""
+    prompt_dir = get_strix_resource_path("agents", _PROMPT_DIRNAME)
+    env = Environment(
+        loader=FileSystemLoader(prompt_dir),
+        autoescape=select_autoescape(enabled_extensions=(), default_for_string=False),
+    )
+    rendered = env.get_template("scope.jinja").render(
+        system_prompt_context=system_prompt_context or {},
+    )
+    return str(rendered).strip()
