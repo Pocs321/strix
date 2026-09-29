@@ -61,7 +61,7 @@ class PreparationContext:
     workspace: Path
     candidate: FixCandidateV1
     attempt: int = 0
-    feedback: list[FixPreparationAttempt] = field(default_factory=list)
+    feedback: list[FixPreparationAttempt] = field(default_factory=list[FixPreparationAttempt])
 
 
 RepairAgent = Callable[
