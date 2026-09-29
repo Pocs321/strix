@@ -61,6 +61,8 @@ def _read_anchor_source(root: Path, file: str) -> str | None:
 def anchor_location(
     root: Path,
     location: CandidateLocation | FixEdit,
+    *,
+    exact_source: bool = False,
 ) -> AnchorResult:
     content = _read_anchor_source(root, location.file)
     if content is None:
@@ -78,6 +80,8 @@ def anchor_location(
         ):
             return AnchorResult(AnchorStatus.STALE, location)
         return AnchorResult(AnchorStatus.MISSING, location)
+    if len(matches) > 1 and exact_source and location.start_line in matches:
+        matches = (location.start_line,)
     if len(matches) > 1:
         return AnchorResult(AnchorStatus.AMBIGUOUS, location, matches)
 

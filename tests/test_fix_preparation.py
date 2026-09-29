@@ -20,6 +20,7 @@ from strix.fix.contracts import (
     FixPreparationRequestV1,
     PreparationBlocker,
     PreparationState,
+    RegressionTestResult,
     RepairOutcome,
     RepairStatus,
     ReproductionSpec,
@@ -30,11 +31,14 @@ from strix.fix.contracts import (
     VerifierResult,
     candidate_from_legacy_report,
 )
+from strix.fix.evidence import command_status
 from strix.fix.locations import AnchorStatus, anchor_location
 from strix.fix.prepare import (
     PreparationContext,
+    _matches_baseline_failure,
     _network_isolation_prefix,
     build_git_manifest,
+    build_git_patch,
     prepare_fix,
     run_command,
 )
@@ -42,6 +46,34 @@ from strix.fix.prepare import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _regression() -> RegressionTestResult:
+    base = CheckResult(
+        name="authorization",
+        argv=["python", "regression.py"],
+        status=CheckStatus.FAILED,
+        exit_code=1,
+        duration_seconds=0,
+        target=VerificationTarget.BASE,
+        output="unauthorized access allowed",
+    )
+    passed = base.model_copy(
+        update={
+            "status": CheckStatus.PASSED,
+            "exit_code": 0,
+            "target": VerificationTarget.PATCHED,
+            "output": "passed",
+        }
+    )
+    return RegressionTestResult(
+        name="authorization",
+        expected_base_failure="unauthorized access allowed",
+        harness_sha256="a" * 64,
+        base=base,
+        patched=passed,
+        behavior=passed,
+    )
 
 
 def _git(workspace: Path, *args: str) -> str:
@@ -123,6 +155,7 @@ def _request(candidate: FixCandidateV1, *, attempts: int = 2) -> FixPreparationR
             )
         ],
         max_repair_attempts=attempts,
+        network_allowed=True,
     )
 
 
@@ -154,6 +187,7 @@ async def _verified(
         reproduction_summary="The vulnerable input is rejected.",
         sibling_paths_reviewed=["app.py"],
         preserved_behaviors=["The module compiles."],
+        regression_tests=[_regression()],
         security_tests=[
             CheckResult(
                 name="security reproduction",
@@ -403,6 +437,7 @@ async def test_repository_baseline_failure_is_a_typed_blocker(
             output="existing failure",
             required=command.required,
             baseline_status=CheckStatus.FAILED,
+            baseline_exit_code=1,
             baseline_output="existing failure",
         )
 
@@ -445,6 +480,7 @@ async def test_different_candidate_and_baseline_failures_are_repairable(
             output="candidate-specific failure",
             required=command.required,
             baseline_status=CheckStatus.FAILED,
+            baseline_exit_code=1,
             baseline_output="different pre-existing failure",
         )
 
@@ -582,7 +618,7 @@ async def test_security_blocker_stops_without_repair_retry(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_budget_exhaustion_fails_without_verification(tmp_path: Path) -> None:
+async def test_budget_exhaustion_retains_partial_evidence_and_turns(tmp_path: Path) -> None:
     workspace, commit = _workspace(tmp_path)
     verifier_called = False
 
@@ -616,7 +652,8 @@ async def test_budget_exhaustion_fails_without_verification(tmp_path: Path) -> N
     )
 
     assert result.state is PreparationState.FAILED
-    assert verifier_called is False
+    assert verifier_called is True
+    assert result.attempt_history[0].repair.turns_used == 40
     assert result.changed_files == ["app.py"]
 
 
@@ -673,8 +710,8 @@ async def test_prepare_fix_requires_verifier_security_test(tmp_path: Path) -> No
         verify=verify_without_test,
     )
 
-    assert result.state is PreparationState.FAILED
-    assert "did not execute a security test" in " ".join(result.gaps)
+    assert result.state is PreparationState.BLOCKED
+    assert "paired functional regression" in " ".join(result.gaps)
 
 
 @pytest.mark.asyncio
@@ -695,7 +732,7 @@ async def test_prepare_fix_requires_closed_security_invariant(tmp_path: Path) ->
         verify=incomplete,
     )
 
-    assert result.state is PreparationState.FAILED
+    assert result.state is PreparationState.BLOCKED
     assert "invariant" in " ".join(result.gaps)
 
 
@@ -852,3 +889,110 @@ async def test_run_command_blocks_egress_when_network_not_allowed(tmp_path: Path
         assert "not run" in result.output
     else:
         assert result.status is CheckStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_manifest_patch_includes_untracked_companion_file(tmp_path: Path) -> None:
+
+    workspace, _ = _workspace(tmp_path)
+    (workspace / "companion.py").write_text("guard = True\n")
+    manifest, _, _ = await build_git_manifest(workspace)
+    patch = await build_git_patch(workspace, manifest)
+    assert b"b/companion.py" in patch
+    assert b"+guard = True" in patch
+    _git(workspace, "diff", "--check")
+
+
+def test_baseline_comparison_normalizes_only_known_checkout_roots() -> None:
+
+    result = CheckResult(
+        name="typecheck",
+        argv=["tsc"],
+        status=CheckStatus.FAILED,
+        exit_code=2,
+        duration_seconds=0,
+        output="/workspace/source/a.ts: TS100",
+        workspace_root="/workspace/source",
+        baseline_status=CheckStatus.FAILED,
+        baseline_exit_code=2,
+        baseline_output="/workspace/base/a.ts: TS100",
+        baseline_workspace_root="/workspace/base",
+    )
+    assert _matches_baseline_failure(result)
+    assert not _matches_baseline_failure(
+        result.model_copy(update={"output": "/workspace/source/a.ts: TS200"})
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_planner_sees_companion_files_and_preserves_partial_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace, commit = _workspace(tmp_path)
+    seen = []
+
+    async def repair(context: PreparationContext, checks: list[CheckResult]) -> RepairOutcome:
+        (workspace / "companion.py").write_text("guard = True\n")
+        return await _noop_repair(context, checks)
+
+    async def planner(_context: PreparationContext, manifest: list) -> list[CommandSpec]:
+        seen.extend(item.path for item in manifest)
+        return [CommandSpec(name="native tests", argv=["missing-runtime", "test"])]
+
+    async def runner(_workspace: Path, command: CommandSpec) -> CheckResult:
+        return CheckResult(
+            name=command.name,
+            argv=command.argv,
+            status=CheckStatus.UNAVAILABLE,
+            exit_code=127,
+            duration_seconds=0,
+        )
+
+    result = await prepare_fix(
+        _request(_candidate(commit)),
+        workspace,
+        repair=repair,
+        verify=_verified,
+        check_planner=planner,
+        command_runner=runner,
+    )
+    assert set(seen) == {"app.py", "companion.py"}
+    assert result.state is PreparationState.BLOCKED
+    assert result.verifier and result.verifier.regression_tests[0].passed()
+    assert len(result.final_file_manifest) == 2
+    assert result.attempts == 1
+
+
+def test_skipped_check_and_missing_runtime_are_not_passing_evidence() -> None:
+
+    assert command_status(0, "Skipping to avoid parser lock")[0] is CheckStatus.SKIPPED
+    assert command_status(127, "bun: command not found")[0] is CheckStatus.UNAVAILABLE
+    assert (
+        not _regression()
+        .model_copy(
+            update={"base": _regression().base.model_copy(update={"failure_kind": "environment"})}
+        )
+        .passed()
+    )
+
+
+def test_candidate_keeps_full_finding_without_inventing_reproduction() -> None:
+    candidate = candidate_from_legacy_report(
+        {
+            "title": "Authorization bypass",
+            "technical_analysis": "Critical exploit context.",
+            "remediation_steps": "Enforce authorization.",
+            "code_locations": [
+                {
+                    "file": "app.py",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "fix_before": "unsafe",
+                    "fix_after": "safe",
+                }
+            ],
+        }
+    )
+    assert candidate and candidate.finding
+    assert candidate.finding.description == "Critical exploit context."
+    assert candidate.reproduction is None

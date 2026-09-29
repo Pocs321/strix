@@ -37,6 +37,7 @@ class CheckStatus(StrEnum):
     FAILED = "failed"
     UNAVAILABLE = "unavailable"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 class VerificationTarget(StrEnum):
@@ -153,6 +154,13 @@ class ReportedCheck(ContractModel):
     executed: bool = False
 
 
+class FindingContext(ContractModel):
+    title: str = ""
+    description: str = ""
+    evidence: str = ""
+    remediation: str = ""
+
+
 class FixCandidateV1(ContractModel):
     version: Literal["1"] = "1"
     source_identity: SourceIdentity | None = None
@@ -162,10 +170,14 @@ class FixCandidateV1(ContractModel):
     reproduction: ReproductionSpec | None = None
     reported_checks: list[ReportedCheck] = []
     known_gaps: list[str] = []
+    finding: FindingContext | None = None
 
     def digest(self) -> str:
+        data = self.model_dump(mode="json")
+        if self.finding is None:
+            data.pop("finding", None)  # Preserve digests for stored legacy candidates.
         payload = json.dumps(
-            self.model_dump(mode="json"),
+            data,
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -197,6 +209,45 @@ class CheckResult(ContractModel):
     target: VerificationTarget | None = None
     baseline_status: CheckStatus | None = None
     baseline_output: str | None = None
+    cwd: str = "."
+    baseline_exit_code: int | None = None
+    failure_kind: Literal["environment", "timeout", "check", "source_changed"] | None = None
+    workspace_root: str | None = None
+    baseline_workspace_root: str | None = None
+
+
+class RegressionTestResult(ContractModel):
+    """One unchanged test run on both revisions, plus a legitimate-operation check."""
+
+    name: str
+    expected_base_failure: str = Field(min_length=1)
+    harness_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    base: CheckResult
+    patched: CheckResult
+    behavior: CheckResult
+
+    def passed(self) -> bool:
+        return (
+            self.base.target is VerificationTarget.BASE
+            and self.patched.target is VerificationTarget.PATCHED
+            and self.behavior.target is VerificationTarget.PATCHED
+            and self.base.argv == self.patched.argv
+            and self.base.cwd == self.patched.cwd
+            and self.base.status is CheckStatus.FAILED
+            and self.base.exit_code == 1
+            and self.base.failure_kind in {None, "check"}
+            and self.expected_base_failure in self.base.output
+            and self.patched.status is CheckStatus.PASSED
+            and self.patched.exit_code == 0
+            and self.behavior.status is CheckStatus.PASSED
+            and self.behavior.exit_code == 0
+        )
+
+
+class VerificationHarness(ContractModel):
+    path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content: str
 
 
 class VerifierResult(ContractModel):
@@ -211,6 +262,9 @@ class VerifierResult(ContractModel):
     security_tests: list[CheckResult] = []
     repairable: bool = False
     blocker: PreparationBlocker | None = None
+    regression_tests: list[RegressionTestResult] = []
+    harnesses: list[VerificationHarness] = []
+    notes: list[str] = []
 
 
 class RepairOutcome(ContractModel):
@@ -220,6 +274,8 @@ class RepairOutcome(ContractModel):
     reproduction_command: CommandSpec | None = None
     turns_used: int = Field(default=0, ge=0)
     blocker: PreparationBlocker | None = None
+    checks: list[CommandSpec] = []
+    command_results: list[CheckResult] = []
 
 
 class FixPreparationAttempt(ContractModel):
@@ -258,6 +314,7 @@ class FixPreparationResultV1(ContractModel):
     attempt_history: list[FixPreparationAttempt] = []
     gaps: list[str] = []
     blocker: PreparationBlocker | None = None
+    setup_checks: list[CheckResult] = []
     attempts: int = Field(default=0, ge=0)
     elapsed_seconds: float = Field(default=0, ge=0)
     cost_usd: float | None = Field(default=None, ge=0)
@@ -318,13 +375,18 @@ def candidate_from_legacy_report(
             ReportedCheck(name="reporting-agent verification", result=verification, executed=False)
         )
 
+    reproduction = str(report.get("poc_description") or report.get("evidence") or "").strip()
     return FixCandidateV1(
         source_identity=source_identity,
         security_invariant=invariant,
         finding_locations=locations,
         draft_edits=edits,
-        reproduction=ReproductionSpec(
-            instructions=str(report.get("poc_description") or report.get("evidence") or invariant)
+        reproduction=ReproductionSpec(instructions=reproduction) if reproduction else None,
+        finding=FindingContext(
+            title=str(report.get("title") or ""),
+            description=str(report.get("description") or report.get("technical_analysis") or ""),
+            evidence=str(report.get("evidence") or report.get("poc_description") or ""),
+            remediation=str(report.get("remediation_steps") or ""),
         ),
         reported_checks=reported_checks,
         known_gaps=["The reporting-agent verification is not independent."],
