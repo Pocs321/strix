@@ -34,7 +34,7 @@ Kubernetes clusters expose a large attack surface through their API server, kube
 
 ### Ingress-NGINX Admission
 
-Inventory validating-webhook reachability from the pod network and the controller's service-account permissions. IngressNightmare can reach controller execution without a Kubernetes account; fixes are in ingress-nginx 1.11.5 / 1.12.1 ([advisory](https://kubernetes.io/blog/2025/03/24/ingress-nginx-cve-2025-1974/)). Community ingress-nginx is retired and receives no security fixes; identify the implementation before applying that status to other NGINX controllers or the Ingress API ([support status](https://kubernetes.io/blog/2026/01/29/ingress-nginx-statement/)).
+Inventory validating-webhook reachability from the pod network and the controller's service-account permissions. IngressNightmare illustrates controller execution without a Kubernetes account ([advisory](https://kubernetes.io/blog/2025/03/24/ingress-nginx-cve-2025-1974/)). Identify the controller implementation/image, then verify affected builds, backports, and maintenance status against current project or vendor notices; distinguish community ingress-nginx from other NGINX controllers and the Ingress API ([project notice](https://kubernetes.io/blog/2026/01/29/ingress-nginx-statement/)).
 
 ### RBAC Misconfigurations
 

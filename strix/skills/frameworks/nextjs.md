@@ -12,7 +12,7 @@ Security testing for Next.js applications. Focus on authorization drift across r
 **Routers**
 - App Router (`app/`) and Pages Router (`pages/`) often coexist
 - Route Handlers (`app/api/**`) and API routes (`pages/api/**`)
-- Middleware: `middleware.ts` at project root; Next.js 16 deprecates this name in favor of `proxy.ts`, which requires the Node.js runtime. Existing Edge deployments can retain `middleware.ts`. Node middleware is stable in 15.5+; inspect the deployed runtime before selecting Edge-specific probes ([migration guide](https://nextjs.org/docs/app/guides/upgrading/version-16)).
+- Middleware/proxy: inspect `middleware.ts`, `proxy.ts`, installed Next.js metadata, and runtime configuration. Check the matching framework docs for supported filenames, Node/Edge behavior, and feature status before selecting runtime-specific probes ([migration guide](https://nextjs.org/docs/app/guides/upgrading/version-16)).
 
 **Runtimes**
 - Node.js (full API access)
@@ -42,6 +42,8 @@ Security testing for Next.js applications. Focus on authorization drift across r
 - Edge-only features (bot protection, IP gates) and their Node equivalents
 
 ## Reconnaissance
+
+At each assessment, establish the deployed build from package metadata, lockfiles, or runtime evidence. Verify release/support status and applicable fixes through current official docs, advisories, or upstream source; linked advisories are starting points, not a complete or permanently current list. Recheck when the target build or proposed remediation changes, and mark status unverified if evidence is unavailable.
 
 **Route Discovery**
 
@@ -91,7 +93,7 @@ Inspect Network tab for POST requests with `Next-Action` header. Extract action 
 ### Middleware Bypass
 
 **Known Techniques**
-- `x-middleware-subrequest` header crafting (CVE-2025-29927): middleware-only authorization can be skipped on affected deployments. Fixed in 12.3.5 / 13.5.9 / 14.2.25 / 15.2.3; Vercel-hosted deployments were automatically protected. Check whether external headers reach the origin and whether the destination enforces authorization independently ([advisory](https://github.com/vercel/next.js/security/advisories/GHSA-f82v-jwr5-mffw)).
+- `x-middleware-subrequest` header crafting (CVE-2025-29927): middleware-only authorization can be skipped on affected deployments. Resolve the installed branch and hosting protections from the advisory and provider configuration, then check whether external headers reach the origin and the destination enforces authorization independently ([advisory](https://github.com/vercel/next.js/security/advisories/GHSA-f82v-jwr5-mffw)).
 - `x-nextjs-data` probing
 - Look for 307 + `x-middleware-rewrite`/`x-nextjs-redirect` headers
 
@@ -123,7 +125,7 @@ Middleware checks first value, handler uses last or array.
 **Cache Boundary Failures**
 - User-bound data cached without identity keys (ETag/Set-Cookie unaware)
 - Personalized content served from shared cache/CDN
-- Missing `no-store` on sensitive fetches that actually enter a shared cache. Next.js 15+ leaves `fetch` and GET Route Handlers uncached by default. Next.js 16 Cache Components use explicit `use cache` boundaries: inspect cache-key arguments/closed-over values, `cacheTag`, `cacheLife`, and invalidation for user/tenant separation ([Next.js caching defaults](https://nextjs.org/docs/app/guides/upgrading/version-15), [Cache Components](https://nextjs.org/docs/app/getting-started/cache-components)).
+- Missing `no-store` on sensitive fetches matters only when they enter a shared cache. Determine `fetch` and GET Route Handler defaults for the deployed version from docs/configuration and observed responses. Where Cache Components are enabled, inspect `use cache` arguments/closed-over values, `cacheTag`, `cacheLife`, and invalidation for user/tenant separation ([caching documentation](https://nextjs.org/docs/app/getting-started/cache-components)).
 
 **Flight Data Leakage**
 

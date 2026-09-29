@@ -91,7 +91,7 @@ Binary search the character space to minimize requests. Works on any string fiel
 
 ### `$where` JavaScript Injection
 
-If `$where` is enabled, inject server-side JavaScript. `$where`, `$function`, and `$accumulator` are deprecated in MongoDB 8.0+, but server-side scripting is enabled by default; inspect `security.javascriptEnabled` / `--noscripting` and the deployed service configuration. MongoDB 6.0 uses MozJS-91 instead of MozJS-60; some legacy nonstandard functions are unavailable ([MongoDB documentation](https://www.mongodb.com/docs/manual/reference/operator/query/where/)):
+If `$where` is enabled, inject server-side JavaScript. Inspect `security.javascriptEnabled` / `--noscripting`, managed-service restrictions, and the installed engine version. Verify operator availability, defaults, and supported functions against that build's documentation or controlled probes; deprecation alone does not mean execution is disabled ([MongoDB documentation](https://www.mongodb.com/docs/manual/reference/operator/query/where/)):
 ```json
 {"$where": "function(){return this.role == 'admin'}"}                          // direct filter — returns matching documents
 {"$where": "function(){return this.username == 'admin' && sleep(2000)}"}       // timing oracle only — sleep() returns undefined (falsy), so no documents are returned; observe latency

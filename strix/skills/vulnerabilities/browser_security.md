@@ -106,9 +106,9 @@ Prove the strongest reliable capability first. If escalation requires a user ges
 
 ### Local Network and Loopback Access
 
-Chrome 142+ applies Local Network Access permission checks for covered requests from websites to local destinations; secure-context, request type, permission state, and enterprise policy affect reachability. Test DNS rebinding and browser-to-local-service chains in the target browser, including permission denied and granted states. A successful server-side request does not establish browser reachability ([Chrome LNA](https://developer.chrome.com/blog/local-network-access)).
+Identify the browser build, enabled flags, permission state, and enterprise policy; consult its current Local Network Access documentation and verify actual behavior with controlled requests. Test DNS rebinding and browser-to-local-service chains in both permission-denied and permission-granted states. A successful server-side request does not establish browser reachability ([Chrome LNA](https://developer.chrome.com/blog/local-network-access)).
 
-Chrome 145+ uses separate permissions for `local-network` and `loopback-network`; `local-network-access` is an alias for permission queries and Permissions Policy. Record which destination class was permitted before claiming access to both LAN and localhost services ([Chrome 145](https://developer.chrome.com/release-notes/145#local_network_access_split_permissions)).
+Discover which permission names and aliases the target supports, including `local-network`, `loopback-network`, and `local-network-access`. Record which destination class was permitted before claiming access to both LAN and localhost services ([permission reference](https://developer.chrome.com/release-notes/145#local_network_access_split_permissions)).
 
 ### JavaScript Gadget Discovery
 

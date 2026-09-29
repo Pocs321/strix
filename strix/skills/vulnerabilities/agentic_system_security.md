@@ -110,10 +110,10 @@ Classify each discovered integration by data read, data write, external communic
 - For browser or loopback OAuth, review redirect URI, state/PKCE handling, localhost binding, and consent proxying. Treat metadata fetches and tool discovery on remote servers as SSRF-relevant surfaces.
 - For stdio servers, the launch command and environment are already code execution. Discovery must not execute an unreviewed server binary or mutable package tag.
 
-#### MCP 2026-07-28 Protocol Boundaries
+#### MCP Protocol Boundaries
 
-- Identify the actual protocol revision. MCP 2026-07-28 requests carry their own version and client metadata, with optional `server/discover`; this revision does not use `initialize`/`initialized` or `Mcp-Session-Id`. On this revision, test authorization on every independent request and do not trust client-supplied identity/capabilities in `_meta` as authenticated identity. Keep initialization/session tests for older deployments.
-- Multi-round tool requests return `input_required` and resume through a retry with `inputResponses`. Test whether a response from another user, tool invocation, or approval round can be substituted, and whether a retry repeats a consequential action ([MCP protocol specification](https://blog.modelcontextprotocol.io/posts/2026-07-28/)).
+- Identify the protocol revision and client/server SDK builds from configuration and wire traffic, then consult the matching specification and current SDK advisories. Determine whether the transport uses initialization/session IDs or independent requests with client metadata and discovery. Test authorization on every request; client-supplied identity/capabilities in `_meta` are not authenticated identity.
+- Where multi-round tool requests use `input_required` and `inputResponses`, trace the retry/resume binding. Test whether a response from another user, tool invocation, or approval round can be substituted, and whether a retry repeats a consequential action ([MCP protocol specification](https://blog.modelcontextprotocol.io/posts/2026-07-28/)).
 - For OAuth callbacks, bind the expected issuer from validated discovery to the PKCE transaction. A present `iss` must match exactly, even if metadata did not advertise support; an absent `iss` must be rejected when `authorization_response_iss_parameter_supported` is true. Test issuer changes between discovery, registration, and callback, including error callbacks. Bind client credentials to their authorization-server issuer. Require the MCP server's `resource` in authorization and token requests and validate the token's audience at the server ([authorization requirements](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)).
 
 ### Executable Component Supply Chain
@@ -164,7 +164,7 @@ npx @modelcontextprotocol/inspector@<reviewed-version> --cli \
   --method tools/list --format json
 ```
 
-- MCP Inspector 2.1.0 requires Node.js `>=22.19.0`. Check the selected package's engine requirements before pinning.
+- Before choosing MCP Inspector, inspect package-registry metadata, engine requirements, release notes, and advisories. Select a compatible reviewed version and pin that exact version for the run; do not infer safety from a release tag.
 - Prefer CLI/TUI and loopback binding over exposing the web UI.
 - Preserve the generated API token; never disable authentication or bind the process-spawning backend to an external interface.
 - Do not publish ports 6274/6277 or pass through the Docker socket/host devices.
@@ -179,7 +179,7 @@ npx @modelcontextprotocol/inspector@<reviewed-version> --cli \
 npx promptfoo@<reviewed-version> eval
 ```
 
-- Promptfoo's documented Node.js requirements are `^20.20.0` or `>=22.22.0`. Check the selected package's engine requirements before pinning.
+- Resolve Promptfoo's runtime requirements, supported features, and security status from registry metadata and current upstream docs before choosing and pinning a version.
 - Use synthetic prompts/data and a dedicated test provider/project.
 - Provider calls transmit data externally and can incur cost even when evaluation orchestration is local. Set request/concurrency and spending ceilings.
 - Pin model, provider, prompt, tool schema, retrieval corpus revision, and evaluator versions.

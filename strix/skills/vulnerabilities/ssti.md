@@ -76,7 +76,7 @@ When output isn't reflected:
 
 ### Jinja2 / Mako (Python)
 
-**Jinja sandbox:** indirect `str.format` references and `|attr` require version-specific checks; their sandbox fixes are in 3.1.5 and 3.1.6 respectively. Establish template-source control and inspect custom filters before choosing gadgets; user data passed only as a variable is a different surface ([release notes](https://jinja.palletsprojects.com/en/stable/changes/)).
+**Jinja sandbox:** resolve the installed Jinja build and check current sandbox advisories before selecting indirect `str.format` or `|attr` gadgets. Establish template-source control and inspect custom filters; user data passed only as a variable is a different surface ([release notes](https://jinja.palletsprojects.com/en/stable/changes/)).
 
 The classic Python class walk — every object exposes its method-resolution-order, which leads to `object`, which exposes every subclass loaded in the interpreter, which includes things like `subprocess.Popen`:
 

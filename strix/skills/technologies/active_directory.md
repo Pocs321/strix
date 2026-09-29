@@ -100,7 +100,7 @@ certipy find -u <USER>@<DOMAIN> -p <PASS> -dc-ip <DC_IP> -vulnerable -stdout
 - **ESC8** — NTLM relay to the CA web-enrollment endpoint (coerce a DC, relay to `/certsrv`) → DC certificate → DCSync.
 - **ESC others** — ESC2/3 (any-purpose/enrollment-agent), ESC4 (writable template DACL → make it ESC1), ESC6 (`EDITF_ATTRIBUTESUBJECTALTNAME2` on the CA), ESC7 (CA officer rights), ESC9/10 (weak cert mapping), ESC11 (RPC relay), ESC13 (issuance-policy→group), ESC15 (app-policy on v1 templates). `certipy find -vulnerable` flags each.
 
-**Strong certificate mapping:** DCs with the September 9, 2025 update or later enforce strong certificate mapping without Compatibility-mode fallback. Inspect the issuing template's SID extension, explicit mappings, KDC patch level, and the actual principal selected at authentication. A requested privileged UPN alone does not establish a working ESC chain on a fully updated domain ([KB5014754](https://support.microsoft.com/en-us/servicing/os/windows-server/2022/05/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers)).
+**Strong certificate mapping:** establish the DC patch level, mapping policy, and vendor backports; consult Microsoft's current enforcement guidance before assuming Compatibility mode is available. Inspect template SID extensions, explicit mappings, and the principal selected at authentication. A requested privileged UPN alone does not establish a working ESC chain ([KB5014754](https://support.microsoft.com/en-us/servicing/os/windows-server/2022/05/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers)).
 
 ### Windows Server 2025 dMSA / BadSuccessor
 

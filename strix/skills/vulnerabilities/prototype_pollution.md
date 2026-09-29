@@ -51,7 +51,7 @@ Prototype pollution corrupts shared object prototypes (`Object.prototype`, `Arra
 **Common Sinks**
 - `lodash.merge`, `lodash.defaultsDeep`, `deep-extend`, `merge-options`
 - Express/query parsers accepting nested objects
-- YAML merge-key handling with prototype keys: js-yaml `>=4.0.0 <4.1.1` and `<3.14.2` can change the parsed result's prototype through `<<` merges (fixed in 4.1.1 / 3.14.2). Trace inherited values from that parsed object into a sensitive consumer; this does not require global `Object.prototype` modification. The old `load` versus `safeLoad` distinction does not describe the modern API ([merge advisory](https://github.com/nodeca/js-yaml/security/advisories/GHSA-mh29-5h37-fv8m)).
+- YAML merge-key handling with prototype keys: identify the js-yaml version/schema and check applicable upstream advisories. Test whether `<<` merges alter the parsed result's prototype, then trace inherited values into a sensitive consumer; global `Object.prototype` modification is not required. Verify the installed API rather than assuming `load` versus `safeLoad` determines safety ([merge advisory](https://github.com/nodeca/js-yaml/security/advisories/GHSA-mh29-5h37-fv8m)).
 - JSON.parse → merge into existing object without null prototype
 
 **RCE Gadget Chains (Node.js)**
