@@ -499,17 +499,15 @@ async def run_strix_scan(
             fixes = ScanFixes(
                 session=sandbox_session,
                 coordinator=coordinator,
-                parent_id=root_id,
                 scan_id=scan_id,
                 state_dir=state_dir,
                 local_sources=local_sources,
                 hooks=hooks,
+                report_state=report_state,
                 event_sink=event_sink,
                 sink=fix_sink,
             )
-            report_state.fix_finding_callback = fixes.notify
-            for finding in report_state.get_existing_vulnerabilities():
-                fixes.notify(finding)
+            report_state.defer_completion = True
 
         child_agent_builder = make_child_factory(
             scan_mode=scan_mode,
@@ -521,8 +519,8 @@ async def run_strix_scan(
             system_prompt_context=scope_context,
         )
 
-        async def spawn_child_agent(**kwargs: Any) -> dict[str, Any]:
-            return await start_child_agent(
+        async def native_child(**kwargs: Any) -> dict[str, Any]:
+            options = dict(  # noqa: C408 - merge native defaults with task-specific options
                 coordinator=coordinator,
                 factory=child_agent_builder,
                 agents_db_path=agents_db,
@@ -532,8 +530,18 @@ async def run_strix_scan(
                 interactive=interactive,
                 event_sink=event_sink,
                 hooks=hooks,
-                **kwargs,
             )
+            return await start_child_agent(**{**options, **kwargs})
+
+        async def spawn_child_agent(**kwargs: Any) -> dict[str, Any]:
+            finding_id = kwargs.pop("fix_finding_id", None)
+            if finding_id is not None:
+                if fixes is None:
+                    raise ValueError(  # noqa: TRY301 - actionable tool error
+                        "Fix agents require repository source in a non-interactive scan."
+                    )
+                return await fixes.spawn(finding_id, native_child, **kwargs)
+            return await native_child(**kwargs)
 
         context: dict[str, Any] = {
             "coordinator": coordinator,
@@ -553,6 +561,8 @@ async def run_strix_scan(
         await coordinator.attach_runtime(root_id, session=root_session)
 
         if is_resume:
+            if fixes is not None:
+                await fixes.restore(native_child, context)
             await respawn_subagents(
                 coordinator=coordinator,
                 factory=child_agent_builder,
@@ -679,7 +689,7 @@ async def run_strix_scan(
             await fixes.close()
         report_state = get_global_report_state()
         if report_state is not None:
-            report_state.fix_finding_callback = None
+            report_state.defer_completion = False
         configure_spill_writer(None)
         # Settle descendants before closing sessions: on a clean finish a child
         # can still be mid-turn, and closing its session underneath it crashes it.

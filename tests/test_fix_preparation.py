@@ -426,3 +426,16 @@ def test_new_command_metadata_does_not_change_existing_finding_digest(tmp_path: 
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     assert candidate.digest() == previous
+
+
+@pytest.mark.asyncio
+async def test_completion_limitations_are_preserved_at_top_level(tmp_path):
+    workspace, commit = _workspace(tmp_path)
+
+    async def agent(context, checks):
+        completion = await _noop_repair(context, checks)
+        return completion.model_copy(update={"gaps": ["External integration was not exercised."]})
+
+    result = await prepare_fix(_request(_candidate(commit)), workspace, repair=agent)
+    assert result.state is PreparationState.READY
+    assert result.gaps == result.completion.gaps == ["External integration was not exercised."]

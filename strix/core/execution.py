@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
@@ -356,12 +356,15 @@ async def spawn_child_agent(
     parent_history: list[Any],
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
+    on_complete: Callable[[Any, Any], Awaitable[None]] | None = None,
+    child_id: str | None = None,
 ) -> dict[str, Any]:
     parent_id = parent_ctx.get("agent_id")
     if not isinstance(parent_id, str):
         raise TypeError("Parent agent_id missing from context")
 
-    child_id = uuid.uuid4().hex[:8]
+    resuming = child_id is not None
+    child_id = child_id or uuid.uuid4().hex[:8]
     child_agent = factory(name=name, skills=skills)
     await coordinator.register(
         child_id,
@@ -384,7 +387,9 @@ async def spawn_child_agent(
         name=name,
         parent_id=parent_id,
         task=task,
-        initial_input=child_initial_input(
+        initial_input=[]
+        if resuming
+        else child_initial_input(
             name=name,
             child_id=child_id,
             parent_id=parent_id,
@@ -393,6 +398,7 @@ async def spawn_child_agent(
         ),
         event_sink=event_sink,
         hooks=hooks,
+        on_complete=on_complete,
     )
 
     return {
@@ -1070,6 +1076,7 @@ async def _start_child_runner(
     start_parked: bool = False,
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
+    on_complete: Callable[[Any, Any], Awaitable[None]] | None = None,
 ) -> None:
     session = open_agent_session(child_id, agents_db_path)
     sessions_to_close.append(session)
@@ -1086,8 +1093,9 @@ async def _start_child_runner(
         # ``_run_cycle``. Swallow it here so the detached task does not surface a
         # spurious "Task exception was never retrieved" warning. The root agent
         # hits the same limit on its next call and tears the scan down.
+        result = None
         try:
-            await run_agent_loop(
+            result = await run_agent_loop(
                 agent=child_agent,
                 initial_input=initial_input,
                 run_config=run_config,
@@ -1106,6 +1114,11 @@ async def _start_child_runner(
         except SubagentBudgetReservedError:
             logger.info("child %s stopped at the sub-agent budget reserve", child_id)
         finally:
+            if on_complete is not None:
+                try:
+                    await on_complete(result, session)
+                except Exception:
+                    logger.exception("child %s completion delivery failed", child_id)
             if not coordinator.is_shutting_down:
                 await _notify_parent_on_exit(coordinator, child_id)
 

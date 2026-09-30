@@ -1,8 +1,4 @@
-"""Repair, run native tests, independently review, and retain a draft PR artifact.
-
-All agent file tools and commands use one persistent sandbox checkout. The host
-checkout is an artifact mirror only, updated at repair and review checkpoints.
-"""
+"""Fix-agent configuration, execution evidence, and successful patch export."""
 
 from __future__ import annotations
 
@@ -445,6 +441,34 @@ class _Completion:
     recommendations: list[str] = field(default_factory=list[str])
 
 
+def build_fix_agent(*, name: str = "Fix agent", workspace_root: str) -> Any:
+    settings = load_settings()
+    agent = build_strix_agent(
+        name=name,
+        is_root=False,
+        base_tools=[think],
+        instructions_override=render_fix_prompt(workspace_root=workspace_root),
+        chat_completions_tools=uses_chat_completions_tool_schema(
+            settings.llm.model or "", settings
+        ),
+        strict_tool_schemas=supports_strict_tool_schemas(settings.llm.model or ""),
+    )
+    # Same lifecycle implementation; omit scan-only coverage/reporting guidance.
+    agent.tools = [
+        replace(
+            tool,
+            description=(
+                "Finish this assignment with result_summary and outcome: done or blocked. "
+                "Summarize actual test results, blockers and optional follow-ups."
+            ),
+        )
+        if isinstance(tool, FunctionTool) and tool.name == "agent_finish"
+        else tool
+        for tool in agent.tools
+    ]
+    return agent
+
+
 class _FixAgent:
     """A task adapter around the standard Strix agent, session and lifecycle."""
 
@@ -456,31 +480,7 @@ class _FixAgent:
         self.session = open_agent_session(
             self.agent_id, environment.workspace.parent / "fix-agents.db"
         )
-        settings = load_settings()
-        self.agent = build_strix_agent(
-            name="Fix agent",
-            is_root=False,
-            base_tools=[think],
-            instructions_override=render_fix_prompt(workspace_root=environment.sandbox_workspace),
-            chat_completions_tools=uses_chat_completions_tool_schema(
-                settings.llm.model or "", settings
-            ),
-            strict_tool_schemas=supports_strict_tool_schemas(settings.llm.model or ""),
-        )
-        # Same lifecycle implementation; omit scan-only coverage/reporting guidance.
-        self.agent.tools = [
-            replace(
-                tool,
-                description=(
-                    "Finish this assignment with result_summary and outcome: "
-                    + ", ".join(self.outcomes)
-                    + ". Summarize actual test results, blockers and optional follow-ups."
-                ),
-            )
-            if isinstance(tool, FunctionTool) and tool.name == "agent_finish"
-            else tool
-            for tool in self.agent.tools
-        ]
+        self.agent = build_fix_agent(workspace_root=environment.sandbox_workspace)
         self.context = {
             "coordinator": environment.coordinator,
             "agent_id": self.agent_id,
@@ -613,6 +613,52 @@ async def _create_command_sandbox(
     return cast("BaseSandboxSession", bundle["session"])
 
 
+async def build_fix_artifact(
+    root: Path,
+    environment: _RuntimeEnvironment,
+    artifact_path: Path | None,
+    session: Any,
+) -> tuple[list[FileManifestEntry], str, str | None]:
+    manifest, summary, _ = await build_git_manifest(root)
+    if artifact_path is None:
+        return manifest, summary, None
+    destination = artifact_path.resolve()
+    patch_output = await build_git_patch(root, manifest)
+    with (
+        open_secret_file(destination) as stream,
+        zipfile.ZipFile(stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive,
+    ):
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                [entry.model_dump(mode="json") for entry in manifest],
+                indent=2,
+            ),
+        )
+        archive.writestr("changes.patch", patch_output)
+        archive.writestr(
+            "execution.json",
+            json.dumps([c.model_dump(mode="json") for c in environment.repair_checks], indent=2),
+        )
+        archive.writestr(
+            "agent-sessions.json",
+            json.dumps(
+                {
+                    "repair": await session.get_items(),
+                }
+            ),
+        )
+        tools_path = environment.workspace.parent / "fix-tool-results.jsonl"
+        if tools_path.exists():
+            archive.write(tools_path, "tool-results.jsonl")
+        for entry in manifest:
+            if entry.operation == "delete":
+                continue
+            source = environment.resolve(entry.path)
+            archive.write(source, f"files/{entry.path}")
+    return manifest, summary, str(destination)
+
+
 async def run_fix_preparation(
     request: FixPreparationRequestV1,
     workspace: Path,
@@ -659,50 +705,6 @@ async def run_fix_preparation(
             await environment.initialize()
         return matches
 
-    async def build_artifact(
-        root: Path,
-    ) -> tuple[list[FileManifestEntry], str, str | None]:
-        manifest, summary, _ = await build_git_manifest(root)
-        if artifact_path is None:
-            return manifest, summary, None
-        destination = artifact_path.resolve()
-        patch_output = await build_git_patch(root, manifest)
-        with (
-            open_secret_file(destination) as stream,
-            zipfile.ZipFile(stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive,
-        ):
-            archive.writestr(
-                "manifest.json",
-                json.dumps(
-                    [entry.model_dump(mode="json") for entry in manifest],
-                    indent=2,
-                ),
-            )
-            archive.writestr("changes.patch", patch_output)
-            archive.writestr(
-                "execution.json",
-                json.dumps(
-                    [c.model_dump(mode="json") for c in environment.repair_checks], indent=2
-                ),
-            )
-            archive.writestr(
-                "agent-sessions.json",
-                json.dumps(
-                    {
-                        "repair": await repair.session.get_items(),
-                    }
-                ),
-            )
-            tools_path = environment.workspace.parent / "fix-tool-results.jsonl"
-            if tools_path.exists():
-                archive.write(tools_path, "tool-results.jsonl")
-            for entry in manifest:
-                if entry.operation == "delete":
-                    continue
-                source = environment.resolve(entry.path)
-                archive.write(source, f"files/{entry.path}")
-        return manifest, summary, str(destination)
-
     environment.max_repair_turns = request.repair_turn_limit
     environment.max_budget_usd = request.max_budget_usd
     environment.cancelled = cancelled
@@ -714,13 +716,64 @@ async def run_fix_preparation(
             environment.workspace,
             repair=repair,
             evidence_reader=environment.current_checks,
-            manifest_builder=build_artifact,
+            manifest_builder=lambda root: build_fix_artifact(
+                root, environment, artifact_path, repair.session
+            ),
             source_verifier=verify_source,
             cancelled=cancelled,
         )
         return result.model_copy(update={"cost_usd": environment.usage.total_cost})
     finally:
         await repair.close()
+
+
+async def finish_native_fix(
+    request: FixPreparationRequestV1,
+    environment: _RuntimeEnvironment,
+    hooks: _FixHooks,
+    result: Any,
+    session: Any,
+    artifact_path: Path,
+) -> FixPreparationResultV1:
+    raw = getattr(result, "final_output", None)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = None
+    raw = raw if isinstance(raw, dict) else {}
+    complete = raw.get("agent_completed") and raw.get("outcome") == "done"
+    completion = RepairOutcome(
+        status=RepairStatus.COMPLETE if complete else RepairStatus.BLOCKED,
+        summary=raw.get("summary")
+        or "The Fix agent stopped without completing required validation.",
+        gaps=raw.get("open_items") or [],
+        notes=raw.get("recommendations") or [],
+        turns_used=hooks.turns,
+        command_results=environment.repair_checks,
+        source_digest=hooks.completion_digest,
+    )
+
+    async def completed(_context: PreparationContext, _checks: list[CheckResult]) -> RepairOutcome:
+        return completion
+
+    async def source_matches(_context: PreparationContext) -> bool:
+        # The mirror was cloned at this revision before the child started.
+        return bool(
+            request.candidate.source_identity
+            and environment.base_commit == request.candidate.source_identity.value
+        )
+
+    finished = await prepare_fix(
+        request,
+        environment.workspace,
+        repair=completed,
+        evidence_reader=environment.current_checks,
+        manifest_builder=lambda root: build_fix_artifact(root, environment, artifact_path, session),
+        source_verifier=source_matches,
+        cancelled=environment.cancelled,
+    )
+    return finished.model_copy(update={"cost_usd": environment.usage.total_cost})
 
 
 async def run_isolated_fix_preparation(

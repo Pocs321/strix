@@ -239,7 +239,7 @@ class ReportState:
         self._saved_vuln_ids: set[str] = set()
 
         self.caido_url: str | None = None
-        self.fix_finding_callback: Callable[[dict[str, Any]], None] | None = None
+        self.defer_completion = False
         self.vulnerability_found_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_updated_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_deleted_callback: Callable[[dict[str, Any]], None] | None = None
@@ -446,7 +446,6 @@ class ReportState:
         scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
 
         self.save_run_data()
-        self._notify_fix(report)
         return report_id
 
     def _deleted_vulnerability_reports(self) -> list[dict[str, Any]]:
@@ -563,7 +562,6 @@ class ReportState:
         )
 
         self.save_run_data()
-        self._notify_fix(report)
         return report
 
     def delete_vulnerability_report(
@@ -645,16 +643,8 @@ class ReportState:
         except OSError:
             logger.exception("could not remove %s", md_path)
 
-        self._notify_fix({**report, "deletion": entry})
         logger.info("Deleted vulnerability report %s - %s", report_id, report.get("title"))
         return report
-
-    def _notify_fix(self, report: dict[str, Any]) -> None:
-        if self.fix_finding_callback:
-            try:
-                self.fix_finding_callback(dict(report))
-            except Exception:
-                logger.exception("Could not schedule fix for %s", report.get("id"))
 
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
@@ -755,8 +745,8 @@ class ReportState:
 
         logger.info("Updated scan final fields")
         self.run_record["assessment_completed_at"] = datetime.now(UTC).isoformat()
-        self.save_run_data(mark_complete=self.fix_finding_callback is None)
-        if self.fix_finding_callback is None:
+        self.save_run_data(mark_complete=not self.defer_completion)
+        if not self.defer_completion:
             posthog.end(self, exit_reason="finished_by_tool")
             scarf.end(self, exit_reason="finished_by_tool")
 

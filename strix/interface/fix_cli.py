@@ -126,6 +126,8 @@ def _summary(result: FixPreparationResultV1) -> str:
         for check in result.checks
     )
     gaps = result.gaps.copy()
+    if result.completion:
+        gaps.extend(result.completion.gaps)
     if result.verifier:
         gaps.extend(result.verifier.gaps)
     if result.blocker:

@@ -240,6 +240,7 @@ async def prepare_fix(  # noqa: PLR0911
             candidate=context.candidate,
             candidate_digest=context.candidate.digest(),
             completion=completion,
+            gaps=list(completion.gaps) if completion else [],
             prepared_source_digest=(
                 completion.source_digest if completion and state is PreparationState.READY else None
             ),

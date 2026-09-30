@@ -330,3 +330,23 @@ def test_summary_includes_followups_from_repair_and_reviewer() -> None:
     summary = fix_cli._summary(result)
     assert "re-run the nightly suite" in summary
     assert "rotate the leaked token" in summary
+
+
+def test_summary_keeps_nested_completion_limitations_for_stored_results():
+    candidate = _request("a" * 40).candidate
+    result = FixPreparationResultV1(
+        state=PreparationState.READY,
+        stop_reason="Completed",
+        source_identity=candidate.source_identity,
+        candidate=candidate,
+        candidate_digest=candidate.digest(),
+        completion=RepairOutcome(
+            status=RepairStatus.COMPLETE,
+            summary="Implemented and tested",
+            gaps=["External integration was not exercised."],
+        ),
+    )
+    text = fix_cli._summary(result)
+    assert "External integration was not exercised." in text
+    result.gaps = list(result.completion.gaps)
+    assert fix_cli._summary(result).count("External integration was not exercised.") == 1

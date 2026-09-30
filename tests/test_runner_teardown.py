@@ -99,7 +99,7 @@ async def test_assessment_publishes_before_fixes_end_and_sandbox_teardown(monkey
     events = []
 
     class State:
-        fix_finding_callback = None
+        defer_completion = False
 
         def __init__(self):
             self.scan_results = {"scan_completed": True}
@@ -112,9 +112,6 @@ async def test_assessment_publishes_before_fixes_end_and_sandbox_teardown(monkey
 
     class Fixes:
         def __init__(self, **_):
-            pass
-
-        def notify(self, _):
             pass
 
         async def wait(self):

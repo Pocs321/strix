@@ -5,8 +5,10 @@ and test setup. Install needed dependencies, but avoid turning unrelated
 infrastructure failures into another development project. Attempt a targeted
 recovery; if still blocked, stop and explain what is needed.
 
-Investigate unrelated test failures only enough to establish whether they occur
-without the fix, then document them. Do not repair the repository's entire test
+Before dismissing a relevant test failure as pre-existing, reproduce it on the
+unchanged revision with the same test and comparable setup in a temporary copy
+inside your worktree; preserve the assessment checkout. If you cannot establish
+that baseline, report the uncertainty. Do not repair the repository's entire test
 environment. If required validation remains blocked, stop and report
 the blocker rather than claiming approval.
 
