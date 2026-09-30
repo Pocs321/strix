@@ -210,6 +210,22 @@ keep the `openai/` prefix, `LLM_API_BASE=http://localhost:20128/v1`). Command:
 Phase 0 acceptance ("a **validated** web finding with a PoC") still needs a **running vulnerable web app**
 as target; `-t ./` is a code review and proved the pipeline, not that gate.
 
+## Phase 2 — Internal skills playbooks (started)
+
+The agent's methodology library lives at `strix/skills/<category>/<name>.md` (loaded by `load_skill`,
+assigned per child via `create_agent(skills=[...])`). Strix 2 adds its own playbooks in a **separate**
+registered root, `strix/skills2/`, wired via `register_skill_dir(get_strix_resource_path("skills2"))` in
+`install_strix2_extensions` — additive and rebase-safe (new files, no edit to the upstream skills package;
+same-name files would shadow, so ours use distinct names). Registered dirs are searched ahead of the
+built-ins, and `strix/skills2/**/*.md` ships in the wheel like the other packaged non-`.py` resources.
+
+**Landed:** `strix/skills2/cloud/aws_pentest.md` — the scoped, evidence-first AWS workflow that drives the
+`strix-aws` wrapper: name the principal (`aws_whoami`) → read-only recon into `create_candidate` leads
+(public S3, over-permissive IAM, `0.0.0.0/0` SGs, enumerable secrets) → validate impact into findings with
+captured I/O (the bounded S3 read; or demonstrate a should-be-denied action *as the least-priv principal*) →
+the validator §5 evidence bundle. It encodes the no-false-positive rules (read-only preferred, intrusive
+gated, config/version-only stays a candidate, out-of-scope ⇒ stop). Tests: `tests/test_strix2_skills.py`.
+
 ## Phase 4 — Generalized finding + PoC validator (in progress)
 
 Semantics signed off (`04-validator-semantics.md`, all defaults). Landed the **candidate (lead) tier** —
