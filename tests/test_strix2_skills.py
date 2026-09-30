@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from strix.agents.prompt import render_system_prompt
 from strix.skills import (
     get_available_skills,
     load_skills,
@@ -53,3 +54,13 @@ def test_all_four_playbooks_present() -> None:
 def test_install_registers_the_skill_dir() -> None:
     install_strix2_extensions(None)
     assert get_strix_resource_path("skills2") in registered_skill_dirs()
+
+
+def test_root_prompt_includes_domain_delegation_guidance() -> None:
+    _register()
+    marker = "Strix 2 domain delegation"
+    root = render_system_prompt(is_root=True)
+    child = render_system_prompt(is_root=False)
+    assert root  # rendered non-empty
+    assert marker in root  # loaded for the root agent
+    assert marker not in child  # not for child specialists

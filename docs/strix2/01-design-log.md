@@ -23,6 +23,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | `strix/interface/cli_args.py` | Added `--scope-config` and `--allow-intrusive` flags → set `STRIX_SCOPE_CONFIG` / `STRIX_ALLOW_INTRUSIVE` env (mirrors the existing `--mcp-*` pattern) | Let the operator point at a scope file and gate intrusive actions from the CLI. | 1 |
 | `pyproject.toml` | +`boto3.*`/`botocore.*` to the mypy `ignore_missing_imports` overrides; +a ruff per-file `PLC0415` ignore for `strix/mcp_servers/aws.py` | boto3 ships no type stubs (mypy strict), and the wrapper imports boto3/botocore lazily so the main process never drags in the heavy SDK. Config-only; no product-code change. | 1 |
 | `strix/agents/factory.py` | +1 import; `_wrap_exec_command` calls `enforce_shell_command(command)` before dispatch and returns a refusal string if out of scope | Enforce `scope.yaml` at the shell boundary for network-reaching in-sandbox CLIs (defense-in-depth, mirrors the `call_mcp` check). No-op without a policy or for non-network commands, so upstream behavior is unchanged. | 3 |
+| `strix/agents/prompt.py` | `_resolve_skills` appends `coordination/strix2_domains` for the root agent (+docstring) | Load Strix 2's domain-delegation guidance into the root system prompt. The template already renders every loaded skill via a generic loop, so no template edit is needed; a logged skip if `skills2` isn't registered, so upstream is unchanged. | 3 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -260,9 +261,18 @@ Together with the `network_pentest` skill (candidate discipline) and the candida
 network CLIs now carry the Strix 2 scope + two-tier discipline. Tests:
 `tests/test_strix2_scope_enforcement.py`.
 
-**Deferred (needs an SDK sandbox seam):** structured native tools that run a CLI in the sandbox and parse its
-output, and pre-seeded network/cloud specialist agents (spawned via skills+prompt). The boundary gate + the
-domain skills cover the discipline in the meantime.
+**Pre-seeded domain specialists (done, prompt-level).** Specialization in this codebase is *name + task +
+skills + prompt*, not subclasses, so the network/cloud/infra/api "specialist agents" are realized as
+**delegation guidance in the root prompt**, not new classes. `strix/skills2/coordination/strix2_domains.md`
+tells the root agent to read the scope and `create_agent(...)` one specialist per in-scope domain with the
+matching skill (`cloud/aws_pentest`, `network/network_pentest`, `infra/infra_pentest`, `api/api_pentest`),
+and to hold the two-tier discipline. It loads via a one-line append in `prompt._resolve_skills` (root only)
+and renders through the template's existing generic skill loop — **no template edit**. The root prompt now
+names all four specialists and the candidate→validated rule (verified in `tests/test_strix2_skills.py`).
+
+**Deferred (needs an SDK sandbox seam):** structured native tools that themselves run a CLI in the sandbox
+and parse its output (the sandbox session is not reachable from a custom `@function_tool`). The exec/MCP
+boundary gates, the domain skills, and the root delegation guidance cover the discipline in the meantime.
 
 ## Phase 4 — Generalized finding + PoC validator (in progress)
 
