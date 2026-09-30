@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -15,6 +15,16 @@ logger = logging.getLogger(__name__)
 
 
 _PROMPT_DIRNAME = "prompts"
+
+
+def render_fix_prompt(*, review: bool, workspace_root: str) -> str:
+    """Render a fix assignment without loading scan-only skills."""
+    env = Environment(
+        loader=FileSystemLoader(get_strix_resource_path("agents", _PROMPT_DIRNAME)),
+        autoescape=select_autoescape(enabled_extensions=(), default_for_string=False),
+    )
+    template = "fix_review.jinja" if review else "fix_repair.jinja"
+    return str(env.get_template(template).render(workspace_root=workspace_root))
 
 
 def _resolve_skills(
@@ -101,7 +111,11 @@ def render_system_prompt(
             is_diff_scoped=is_diff_scoped,
         )
         skill_content = load_skills(skills_to_load)
-        env.globals["get_skill"] = lambda name: skill_content.get(name, "")
+
+        def get_skill(name: str) -> str:
+            return skill_content.get(name, "")
+
+        cast("dict[str, Any]", env.globals)["get_skill"] = get_skill
 
         rendered = env.get_template("system_prompt.jinja").render(
             loaded_skill_names=list(skill_content.keys()),

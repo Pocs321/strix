@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 _ROOT_SUBCOMMAND_HELP = """
 Additional commands:
+  strix fix ...            Repair and review a finding in an isolated sandbox
   strix cloud ...          Use the managed Strix platform
   strix auth ...           Manage model-subscription sign-in
   strix view [RUN]         View a completed or running scan
@@ -430,6 +431,11 @@ def main() -> None:
         except SystemExit as exc:
             Console().print(_ROOT_SUBCOMMAND_HELP.strip(), markup=False)
             raise SystemExit(exc.code) from None
+
+    if len(sys.argv) > 1 and sys.argv[1] == "fix":
+        from strix.interface.fix_cli import run_fix
+
+        sys.exit(run_fix(sys.argv[2:]))
 
     # `strix view [<run>]` is a viewer-only subcommand, dispatched before the
     # scan argument parser (which requires a target) and before any scan setup.

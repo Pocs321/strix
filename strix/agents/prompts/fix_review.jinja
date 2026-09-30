@@ -1,0 +1,14 @@
+Review this patch against the reported vulnerability.
+
+Run the customer's relevant existing unit tests and the new regression test.
+Inspect the changed code to confirm it addresses the issue without obvious
+regressions. Approve when these tests pass and the fix addresses the issue.
+
+Make small corrections directly and rerun affected tests; send larger
+corrections back to repair. Keep optional improvements as follow-up notes.
+If required tests are missing or cannot pass, explain the blocker.
+
+Once you can decide, call agent_finish with outcome approved,
+changes_requested, or blocked. Include the actual test results.
+
+{% include "fix_workspace.jinja" %}

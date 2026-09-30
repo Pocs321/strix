@@ -199,7 +199,8 @@ class FixPreparationRequestV1(ContractModel):
     timeout_seconds: int = Field(default=7200, ge=30, le=14400)
     max_budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     network_allowed: bool = False
-    credentials_allowed: list[str] = []
+    # Accept old empty requests, but never look up or forward host credentials.
+    credentials_allowed: list[str] = Field(default=[], max_length=0, exclude=True)
 
 
 class CheckResult(ContractModel):
