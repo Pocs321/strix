@@ -302,6 +302,23 @@ store on every persist) and the "Leads (unvalidated)" section appended to `penet
 (one guarded, logged `write_executive_report` edit — no-op for upstream-only runs). 5 more tests; report
 writer + import-warmup suites stay green (119 passed).
 
-**Not yet (next Phase 3/4 steps):** network/cloud *validated* finding classes + their evidence channels
-(captured request/response, cloud principal + denying policy, runtime repro); scope-coupled proof (needs
-Phase 1 enforcement); MITRE ATT&CK/CIS optional fields on the validated schema.
+**Finding-annotation sidecar (done) — optional ATT&CK/CIS/domain metadata.** Rather than edit the complex
+upstream `create_vulnerability_report` / `ReportState` to add optional fields (high-risk surgery on the crux
+module), Strix 2 adds an **additive sidecar** that mirrors the candidate store: `strix/findings2/`
+(`FindingAnnotation` schema + `FindingAnnotationStore`) + the `annotate_finding` / `list_finding_annotations`
+tools. After filing a finding with `create_vulnerability_report`, the agent calls `annotate_finding(vuln_report_id, domain, mitre_attack, cis_benchmark, notes)` to record the validator §6 optional metadata — MITRE ATT&CK
+technique ids (validated `T####[.###]`), CIS control ids, the finding's domain, and a short pointer to the
+captured domain evidence. It **never gates or changes a finding** (decision 6a); CVSS+CWE stay the required
+rating on the finding itself. Persists `finding_annotations.json` + `FRAMEWORK_MAP.md` beside
+`vulnerabilities.json`; wired in `strix2_ext`; **zero upstream edits**. Tests:
+`tests/test_strix2_finding_annotations.py`.
+
+The **domain evidence channel** itself is the finding's existing required `evidence` field (captured raw
+I/O), which the domain skills already instruct the agent to fill (command+response, cloud
+principal+policy+region, runtime repro); the sidecar's `notes` points at it and the `domain` tags the class.
+
+**Not yet:** first-class network/cloud `finding_class` values inside the upstream schema (would need the
+`_VALID_FINDING_CLASSES` whitelist + a `finding_class` param threaded through `create_vulnerability_report`
+→ `add_vulnerability_report` → writer/SARIF — deferred as a deliberate, larger edit to the crux module; the
+sidecar `domain` covers classification additively meanwhile); scope-coupled proof helpers; SARIF emission of
+the framework tags.

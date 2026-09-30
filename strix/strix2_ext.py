@@ -5,11 +5,12 @@ edits through the upstream startup path. Called once at the top of
 ``run_strix_scan`` (the single upstream edit); everything else it touches is a
 new module. Idempotent — safe to call again on resume or in tests.
 
-Registers the candidate + scope agent tools, binds the candidate store to the run
-directory, loads the scope policy, and registers the Strix 2 skill directory
-(``strix/skills2``) via ``register_skill_dir`` so its playbooks are selectable.
-Future domain tools/skills plug in here through the same seams
-(``register_agent_tools`` / ``register_skill_dir``).
+Registers the candidate + scope + finding-annotation agent tools, binds the
+candidate and finding-annotation stores to the run directory, loads the scope
+policy, and registers the Strix 2 skill directory (``strix/skills2``) via
+``register_skill_dir`` so its playbooks are selectable. Future domain tools/skills
+plug in here through the same seams (``register_agent_tools`` /
+``register_skill_dir``).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from strix.agents.factory import register_agent_tools
 from strix.candidates.store import reset_candidate_store
+from strix.findings2.store import reset_annotation_store
 from strix.scope.enforcement import load_active_policy
 from strix.skills import register_skill_dir
 from strix.tools.candidates.tools import (
@@ -27,6 +29,7 @@ from strix.tools.candidates.tools import (
     list_candidates,
     promote_candidate,
 )
+from strix.tools.findings2.tools import annotate_finding, list_finding_annotations
 from strix.tools.scope.tools import check_scope, scope_status
 from strix.utils.resource_paths import get_strix_resource_path
 
@@ -44,6 +47,8 @@ _STRIX2_TOOLS = (
     dismiss_candidate,
     check_scope,
     scope_status,
+    annotate_finding,
+    list_finding_annotations,
 )
 
 
@@ -55,6 +60,7 @@ def install_strix2_extensions(run_dir: Path | None = None) -> None:
     and set active for the run; absent, enforcement stays inactive.
     """
     reset_candidate_store(run_dir)
+    reset_annotation_store(run_dir)
     load_active_policy()
     register_agent_tools(*_STRIX2_TOOLS)
     register_skill_dir(get_strix_resource_path("skills2"))
