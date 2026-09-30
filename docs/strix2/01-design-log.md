@@ -162,6 +162,14 @@ and never when `STRIX2_AUTO_WRAPPERS` is falsey. Scope is loaded first (`install
 `runner.py:231`) so the policy is available when requests are built. The SaaS/pro path
 (`mcp_connection_requests`) is untouched. Tests in `tests/test_strix2_mcp_aws.py`.
 
+**AWS wrapper — IAM read-only (added).** `iam_list_principals` (users/roles recon) and
+`iam_analyze_principal(name, principal_type)` — reads a principal's attached managed + inline policies and
+flags over-permissive `Allow` statements (a full action wildcard `*`, or a service wildcard like `s3:*` on
+all resources; `admin` marks the classic `*`/`*`) as a **candidate** signal per validator §4.3 ("an IAM
+policy granting `*`" is a candidate, not a finding — validate by demonstrating a should-be-denied action as
+the least-priv principal). Read-only; the analysis helper is pure and handles IAM's URL-encoded policy
+documents. `TOOL_NAMES` (single source of truth for the connection allowlist) updated; 12 more tests.
+
 **Known verification gap.** The wrapper's *live* behavior (real subprocess spawn + MCP connect + real AWS)
 is not covered by an automated test — it needs AWS creds and a lab account. Unit tests cover scope gating,
 argument handling, evidence shaping, tool registration, and the config. A live integration test is

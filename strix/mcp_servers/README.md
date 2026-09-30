@@ -27,6 +27,8 @@ account being listed in `cloud.aws_account_ids`:
 | `s3_list_buckets` | list bucket names | recon |
 | `s3_get_bucket_public_status` | ACL / policy-status / public-access-block → `looks_public` | **candidate** signal |
 | `s3_get_object_head` | bounded ≤1 KiB object read + SHA-256 (request + response captured) | **validated** evidence |
+| `iam_list_principals` | list IAM users and roles | recon |
+| `iam_analyze_principal` | read a user/role's managed + inline policies, flag wildcard/admin (`*`) grants | **candidate** signal |
 
 The wrapper returns evidence; the agent files it with `create_candidate` / `create_vulnerability_report`.
 

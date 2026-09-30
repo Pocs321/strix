@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -51,13 +52,17 @@ TOOL_NAMES = (
     "s3_list_buckets",
     "s3_get_bucket_public_status",
     "s3_get_object_head",
+    "iam_list_principals",
+    "iam_analyze_principal",
 )
 
 _INSTRUCTIONS = (
     "Read-only AWS checks for authorized cloud pentesting. Credentials stay on the "
-    "host; every call is scope-gated on the caller's AWS account id. Use "
-    "s3_get_bucket_public_status to file a candidate lead, and s3_get_object_head "
-    "to capture the bounded read that validates it. No state-changing actions."
+    "host; every call is scope-gated on the caller's AWS account id. S3: "
+    "s3_get_bucket_public_status files a candidate, s3_get_object_head captures the "
+    "bounded read that validates it. IAM: iam_list_principals for recon, "
+    "iam_analyze_principal flags over-permissive (wildcard/admin) policies as a "
+    "candidate. No state-changing actions."
 )
 
 # Seam so tests inject a fake boto3 client without real AWS. Signature:
@@ -288,6 +293,175 @@ def s3_get_object_head(
     )
 
 
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _coerce_policy_document(document: Any) -> dict[str, Any]:
+    """Return an IAM policy document as a dict.
+
+    IAM returns policy documents inconsistently — a dict, or a URL-encoded JSON
+    string (``get_policy_version`` in particular) — so normalize both here.
+    """
+    if isinstance(document, dict):
+        return document
+    if isinstance(document, str):
+        from urllib.parse import unquote
+
+        try:
+            parsed = json.loads(unquote(document))
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _concerning_statements(document: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    """Flag over-permissive ``Allow`` statements in one policy document.
+
+    Concerning = an ``Allow`` with a full action wildcard (``"*"``), or a service
+    wildcard (``"s3:*"``) on all resources. ``admin`` marks the classic ``*``/``*``.
+    """
+    flagged: list[dict[str, Any]] = []
+    for statement in _as_list(document.get("Statement")):
+        if not isinstance(statement, dict) or statement.get("Effect") != "Allow":
+            continue
+        actions = [str(a) for a in _as_list(statement.get("Action"))]
+        resources = [str(r) for r in _as_list(statement.get("Resource"))]
+        action_star = "*" in actions
+        service_wildcard = any(a.endswith(":*") for a in actions)
+        resource_star = "*" in resources
+        if action_star or (service_wildcard and resource_star):
+            flagged.append(
+                {
+                    "source": source,
+                    "actions": actions,
+                    "resources": resources,
+                    "admin": action_star and resource_star,
+                    "action_wildcard": action_star,
+                    "resource_wildcard": resource_star,
+                }
+            )
+    return flagged
+
+
+def iam_list_principals() -> str:
+    """List IAM users and roles in the acting account. Read-only recon.
+
+    Each principal is a lead to triage with iam_analyze_principal, not a finding.
+    Refused if the caller's account is not in scope.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    iam = _client("iam")
+    try:
+        users = [
+            {"name": str(u.get("UserName") or ""), "arn": str(u.get("Arn") or "")}
+            for u in iam.list_users().get("Users", [])
+        ]
+        roles = [
+            {"name": str(r.get("RoleName") or ""), "arn": str(r.get("Arn") or "")}
+            for r in iam.list_roles().get("Roles", [])
+        ]
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"iam list principals failed: {exc}", account=account)
+    return ok(account=account, user_count=len(users), users=users, roles=roles)
+
+
+def iam_analyze_principal(name: str, principal_type: str) -> str:
+    """Analyze an IAM user/role's policies for over-permissive (wildcard/admin) grants.
+
+    Read-only. Reads the principal's attached managed policies and inline policies,
+    then flags ``Allow`` statements with a full action wildcard or a service wildcard
+    on all resources. A true ``overly_permissive`` is a **candidate** (file it with
+    create_candidate) — validate it by demonstrating a should-be-denied action as the
+    least-privilege principal before filing a finding. Refused if the caller's account
+    is not in scope.
+
+    Args:
+        name: The IAM user name or role name (without path).
+        principal_type: ``user`` or ``role``.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    ptype = (principal_type or "").strip().lower()
+    if ptype not in ("user", "role"):
+        return error("principal_type must be 'user' or 'role'")
+    if not (name or "").strip():
+        return error("name is required")
+
+    iam = _client("iam")
+    concerning: list[dict[str, Any]] = []
+    examined: list[str] = []
+    errors: list[str] = []
+
+    try:
+        if ptype == "user":
+            attached = iam.list_attached_user_policies(UserName=name).get("AttachedPolicies", [])
+            inline_names = iam.list_user_policies(UserName=name).get("PolicyNames", [])
+        else:
+            attached = iam.list_attached_role_policies(RoleName=name).get("AttachedPolicies", [])
+            inline_names = iam.list_role_policies(RoleName=name).get("PolicyNames", [])
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"iam list policies failed for {ptype} {name!r}: {exc}", account=account)
+
+    for policy in attached:
+        arn = str(policy.get("PolicyArn") or "")
+        pname = str(policy.get("PolicyName") or arn)
+        try:
+            default_version = iam.get_policy(PolicyArn=arn)["Policy"]["DefaultVersionId"]
+            document = iam.get_policy_version(PolicyArn=arn, VersionId=default_version)[
+                "PolicyVersion"
+            ]["Document"]
+        except (BotoCoreError, ClientError, KeyError) as exc:
+            errors.append(f"managed:{pname}: {exc}")
+            continue
+        examined.append(f"managed:{pname}")
+        concerning.extend(
+            _concerning_statements(_coerce_policy_document(document), f"managed:{pname}")
+        )
+
+    for inline_name in inline_names:
+        try:
+            if ptype == "user":
+                document = iam.get_user_policy(UserName=name, PolicyName=inline_name)[
+                    "PolicyDocument"
+                ]
+            else:
+                document = iam.get_role_policy(RoleName=name, PolicyName=inline_name)[
+                    "PolicyDocument"
+                ]
+        except (BotoCoreError, ClientError, KeyError) as exc:
+            errors.append(f"inline:{inline_name}: {exc}")
+            continue
+        examined.append(f"inline:{inline_name}")
+        concerning.extend(
+            _concerning_statements(_coerce_policy_document(document), f"inline:{inline_name}")
+        )
+
+    return ok(
+        account=account,
+        principal={"type": ptype, "name": name},
+        overly_permissive=bool(concerning),
+        concerning_statements=concerning,
+        policies_examined=examined,
+        errors=errors,
+        note=(
+            "Candidate signal only (over-permissive IAM). Validate by demonstrating an "
+            "action the policy should not allow, as the least-privilege principal, "
+            "before filing a finding."
+        ),
+    )
+
+
 def build() -> FastMCP:
     """Build the AWS wrapper server with its read-only tools registered."""
     server = build_server("strix-aws", _INSTRUCTIONS)
@@ -295,6 +469,8 @@ def build() -> FastMCP:
     server.tool()(s3_list_buckets)
     server.tool()(s3_get_bucket_public_status)
     server.tool()(s3_get_object_head)
+    server.tool()(iam_list_principals)
+    server.tool()(iam_analyze_principal)
     return server
 
 

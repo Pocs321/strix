@@ -11,6 +11,7 @@ import hashlib
 import json
 import sys
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import pytest
 from botocore.exceptions import ClientError
@@ -85,15 +86,70 @@ class _FakeS3:
         }
 
 
-def _factory(*, sts: _FakeSTS | None = None, s3: _FakeS3 | None = None) -> Any:
+class _FakeIAM:
+    def __init__(
+        self,
+        *,
+        users: list[dict[str, Any]] | None = None,
+        roles: list[dict[str, Any]] | None = None,
+        attached: list[dict[str, Any]] | None = None,
+        inline: list[str] | None = None,
+        managed_docs: dict[str, Any] | None = None,
+        inline_docs: dict[str, Any] | None = None,
+    ) -> None:
+        self._users = users or []
+        self._roles = roles or []
+        self._attached = attached or []
+        self._inline = inline or []
+        self._managed_docs = managed_docs or {}
+        self._inline_docs = inline_docs or {}
+
+    def list_users(self, **_: Any) -> dict[str, Any]:
+        return {"Users": self._users}
+
+    def list_roles(self, **_: Any) -> dict[str, Any]:
+        return {"Roles": self._roles}
+
+    def list_attached_user_policies(self, **_: Any) -> dict[str, Any]:
+        return {"AttachedPolicies": self._attached}
+
+    list_attached_role_policies = list_attached_user_policies
+
+    def list_user_policies(self, **_: Any) -> dict[str, Any]:
+        return {"PolicyNames": self._inline}
+
+    list_role_policies = list_user_policies
+
+    def get_policy(self, **_: Any) -> dict[str, Any]:
+        return {"Policy": {"DefaultVersionId": "v1"}}
+
+    def get_policy_version(self, **kwargs: Any) -> dict[str, Any]:
+        return {"PolicyVersion": {"Document": self._managed_docs.get(kwargs.get("PolicyArn"), {})}}
+
+    def get_user_policy(self, **kwargs: Any) -> dict[str, Any]:
+        return {"PolicyDocument": self._inline_docs.get(kwargs.get("PolicyName"), {})}
+
+    def get_role_policy(self, **kwargs: Any) -> dict[str, Any]:
+        return {"PolicyDocument": self._inline_docs.get(kwargs.get("PolicyName"), {})}
+
+
+def _factory(
+    *,
+    sts: _FakeSTS | None = None,
+    s3: _FakeS3 | None = None,
+    iam: _FakeIAM | None = None,
+) -> Any:
     sts = sts or _FakeSTS({"Account": _ACCOUNT, "Arn": _ARN, "UserId": "AIDA"})
     s3 = s3 or _FakeS3()
+    iam = iam or _FakeIAM()
 
     def factory(service: str, _region: str | None) -> Any:
         if service == "sts":
             return sts
         if service == "s3":
             return s3
+        if service == "iam":
+            return iam
         raise AssertionError(f"unexpected service {service!r}")
 
     return factory
@@ -249,6 +305,113 @@ def test_config_forwards_scope_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_builtin_wrapper_configs() -> None:
     configs = builtin_wrapper_configs()
     assert [c.name for c in configs] == ["strix-aws"]
+
+
+# --- iam recon ---------------------------------------------------------------
+
+_ADMIN_DOC = {"Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
+_BENIGN_DOC = {"Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:x"}]}
+_SERVICE_WILDCARD_DOC = {"Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "*"}}
+_DENY_STAR_DOC = {"Statement": [{"Effect": "Deny", "Action": "*", "Resource": "*"}]}
+
+
+def test_iam_list_principals() -> None:
+    set_active_policy(_policy())
+    iam = _FakeIAM(
+        users=[{"UserName": "alice", "Arn": "arn:aws:iam::123456789012:user/alice"}],
+        roles=[{"RoleName": "deploy", "Arn": "arn:aws:iam::123456789012:role/deploy"}],
+    )
+    aws.set_client_factory(_factory(iam=iam))
+    body = json.loads(aws.iam_list_principals())
+    assert body["success"] is True
+    assert body["user_count"] == 1
+    assert body["users"][0]["name"] == "alice"
+    assert body["roles"][0]["name"] == "deploy"
+
+
+def test_iam_list_principals_refused_out_of_scope() -> None:
+    set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
+    assert json.loads(aws.iam_list_principals())["refused"] == "out_of_scope"
+
+
+# --- iam policy analysis (through the public tool) ----------------------------
+
+def _analyze(iam: _FakeIAM, name: str = "alice", ptype: str = "user") -> dict[str, Any]:
+    set_active_policy(_policy())
+    aws.set_client_factory(_factory(iam=iam))
+    return json.loads(aws.iam_analyze_principal(name, ptype))
+
+
+def _iam_with_managed(policy_name: str, document: Any) -> _FakeIAM:
+    arn = f"arn:aws:iam::123456789012:policy/{policy_name}"
+    return _FakeIAM(
+        attached=[{"PolicyName": policy_name, "PolicyArn": arn}],
+        managed_docs={arn: document},
+    )
+
+
+def test_iam_analyze_flags_admin_managed_policy() -> None:
+    body = _analyze(_iam_with_managed("admin", _ADMIN_DOC))
+    assert body["overly_permissive"] is True
+    stmt = body["concerning_statements"][0]
+    assert stmt["admin"] is True
+    assert stmt["source"] == "managed:admin"
+
+
+def test_iam_analyze_benign_policy_not_flagged() -> None:
+    assert _analyze(_iam_with_managed("ro", _BENIGN_DOC))["overly_permissive"] is False
+
+
+def test_iam_analyze_flags_inline_admin() -> None:
+    iam = _FakeIAM(inline=["god"], inline_docs={"god": _ADMIN_DOC})
+    body = _analyze(iam)
+    assert body["overly_permissive"] is True
+    assert body["concerning_statements"][0]["source"] == "inline:god"
+
+
+def test_iam_analyze_flags_service_wildcard_on_all_resources() -> None:
+    body = _analyze(_iam_with_managed("s3all", _SERVICE_WILDCARD_DOC))  # single-dict statement
+    stmt = body["concerning_statements"][0]
+    assert stmt["admin"] is False
+    assert stmt["action_wildcard"] is False
+    assert stmt["resource_wildcard"] is True
+
+
+def test_iam_analyze_deny_star_not_flagged() -> None:
+    assert _analyze(_iam_with_managed("deny", _DENY_STAR_DOC))["overly_permissive"] is False
+
+
+def test_iam_analyze_decodes_urlencoded_document() -> None:
+    # get_policy_version can return the document URL-encoded; it must still be analyzed.
+    iam = _iam_with_managed("admin", quote(json.dumps(_ADMIN_DOC)))
+    assert _analyze(iam)["overly_permissive"] is True
+
+
+def test_iam_analyze_rejects_bad_principal_type() -> None:
+    assert json.loads(aws.iam_analyze_principal("alice", "group"))["success"] is False
+
+
+def test_iam_analyze_requires_name() -> None:
+    set_active_policy(_policy())
+    assert json.loads(aws.iam_analyze_principal("", "user"))["success"] is False
+
+
+def test_iam_analyze_refused_out_of_scope() -> None:
+    set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
+    assert json.loads(aws.iam_analyze_principal("alice", "user"))["refused"] == "out_of_scope"
+
+
+def test_iam_analyze_records_policy_fetch_errors() -> None:
+    class _RaisingIAM(_FakeIAM):
+        def get_policy(self, **_: Any) -> dict[str, Any]:
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "GetPolicy")
+
+    arn = "arn:aws:iam::123456789012:policy/x"
+    iam = _RaisingIAM(attached=[{"PolicyName": "x", "PolicyArn": arn}])
+    body = _analyze(iam)
+    assert body["success"] is True
+    assert body["overly_permissive"] is False
+    assert any("managed:x" in e for e in body["errors"])
 
 
 # --- auto-wire (applicable_builtin_configs / configs_with_builtins) -----------
