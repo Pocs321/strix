@@ -16,11 +16,12 @@ from strix.agents import factory
 from strix.tools.agents_graph.tools import agent_finish
 from strix.tools.finish.tool import finish_scan
 from strix.tools.reporting.tool import create_vulnerability_report
+from strix.tools.respond.tool import respond_to_user
 
 
 _SCAN_AGENT_TOOLS = [
     tool
-    for tool in (*factory._BASE_TOOLS, finish_scan, agent_finish)
+    for tool in (*factory._BASE_TOOLS, finish_scan, agent_finish, respond_to_user)
     if isinstance(tool, FunctionTool)
 ]
 
@@ -29,7 +30,9 @@ _SCAN_AGENT_TOOLS = [
 def test_every_parameter_has_a_description(tool: FunctionTool) -> None:
     properties = tool.params_json_schema.get("properties", {})
     missing = sorted(
-        name for name, schema in properties.items() if not str(schema.get("description", ""))
+        name
+        for name, schema in properties.items()
+        if not (isinstance(schema.get("description"), str) and schema["description"].strip())
     )
     assert not missing, f"{tool.name}: parameters without a description: {missing}"
 
