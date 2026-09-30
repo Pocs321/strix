@@ -10,20 +10,31 @@ import stat
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
-from agents import RunConfig
+from agents import ModelResponse, RunConfig
 from agents.sandbox import SandboxRunConfig
 
-from strix.fix import FixPreparationRequestV1
+from strix.fix import (
+    FixPreparationAttempt,
+    FixPreparationRequestV1,
+    FixPreparationResultV1,
+    PreparationState,
+    RepairOutcome,
+    RepairStatus,
+    VerificationDecision,
+    VerifierResult,
+)
 from strix.fix import runtime as fix_runtime
 from strix.interface import fix_cli
+from strix.runtime import session_manager
 from tests.test_fix_completion import ScriptedModel, finish, patch, shell, suite_commands
 from tests.test_fix_reliability import LocalSandbox, existing_suite
 from tests.test_fix_runtime import _git, _request, _workspace
 
 
-def test_cli_role_budget_overrides(tmp_path):
+def test_cli_role_budget_overrides(tmp_path: Path) -> None:
     request = _request("a" * 40)
     request.max_agent_turns = 500
     path = tmp_path / "request.json"
@@ -44,19 +55,19 @@ def test_cli_role_budget_overrides(tmp_path):
     assert (loaded.repair_turn_limit, loaded.review_turn_limit) == (400, 250)
 
 
-def _local_runtime(monkeypatch, tmp_path, model):
+def _local_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: ScriptedModel) -> None:
     root = tmp_path / "execution" / "source"
     original_environment = fix_runtime._RuntimeEnvironment
 
-    async def sandbox(_sandbox_id):
+    async def sandbox(_sandbox_id: str) -> LocalSandbox:
         return LocalSandbox(root.parent)
 
-    async def noop(*_args):
+    async def noop(*_args: Any) -> None:
         pass
 
     monkeypatch.setattr(fix_cli, "_preflight", noop)
     monkeypatch.setattr(fix_runtime, "_create_command_sandbox", sandbox)
-    monkeypatch.setattr(fix_runtime.session_manager, "cleanup", noop)
+    monkeypatch.setattr(session_manager, "cleanup", noop)
     monkeypatch.setattr(
         fix_runtime,
         "_RuntimeEnvironment",
@@ -72,7 +83,9 @@ def _local_runtime(monkeypatch, tmp_path, model):
 
 
 @pytest.mark.parametrize("blocked", [False, True])
-def test_cli_runs_shared_workflow_and_preserves_original_checkout(tmp_path, monkeypatch, blocked):
+def test_cli_runs_shared_workflow_and_preserves_original_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked: bool
+) -> None:
     workspace, _ = _workspace(tmp_path)
     commit = existing_suite(workspace)
     request = _request(commit)
@@ -118,7 +131,9 @@ def test_cli_runs_shared_workflow_and_preserves_original_checkout(tmp_path, monk
     assert not (workspace / "tests/test_security.py").exists()
 
 
-def test_stale_request_delivers_explanation_without_running_agents(tmp_path, monkeypatch):
+def test_stale_request_delivers_explanation_without_running_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace, _ = _workspace(tmp_path)
     request = _request("a" * 40)
     request_path = tmp_path / "request.json"
@@ -145,7 +160,9 @@ def test_stale_request_delivers_explanation_without_running_agents(tmp_path, mon
     assert output.with_suffix(".patch").read_text() == ""
 
 
-def test_dirty_checkout_is_preserved_and_never_sent_to_agents(tmp_path, monkeypatch):
+def test_dirty_checkout_is_preserved_and_never_sent_to_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace, commit = _workspace(tmp_path)
     (workspace / "app.py").write_text("user work in progress")
     request_path = tmp_path / "request.json"
@@ -172,18 +189,18 @@ def test_dirty_checkout_is_preserved_and_never_sent_to_agents(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_interruption_exports_partial_work_before_removing_temporary_clone(
-    tmp_path, monkeypatch
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace, _ = _workspace(tmp_path)
     commit = existing_suite(workspace)
     waiting = asyncio.Event()
 
     class PausedModel(ScriptedModel):
-        async def get_response(self, **kwargs):
+        async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
             if not self.responses["repair"]:
                 waiting.set()
                 await asyncio.Event().wait()
-            return await super().get_response(**kwargs)
+            return await super().get_response(*args, **kwargs)
 
     model = PausedModel(patch(), [])
     _local_runtime(monkeypatch, tmp_path, model)
@@ -206,14 +223,18 @@ async def test_interruption_exports_partial_work_before_removing_temporary_clone
     assert _git(workspace, "status", "--porcelain") == ""
 
 
-def test_finding_selection_is_required_before_preflight(tmp_path, monkeypatch):
+def test_finding_selection_is_required_before_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "findings.json"
     path.write_text('[{"id": "one"}, {"id": "two"}]')
     monkeypatch.setattr(fix_cli, "_preflight", lambda: pytest.fail("must not start execution"))
     assert fix_cli.run_fix(["--finding", str(path), "--repo", str(tmp_path)]) == 1
 
 
-def test_fix_help_is_dispatched_without_scan_setup(monkeypatch, capsys):
+def test_fix_help_is_dispatched_without_scan_setup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     main = importlib.import_module("strix.interface.main")
 
     monkeypatch.setattr(sys, "argv", ["strix", "fix", "--help"])
@@ -223,7 +244,7 @@ def test_fix_help_is_dispatched_without_scan_setup(monkeypatch, capsys):
     assert "--finding" in capsys.readouterr().out
 
 
-def test_legacy_empty_credential_field_is_accepted_but_forwarding_is_rejected():
+def test_legacy_empty_credential_field_is_accepted_but_forwarding_is_rejected() -> None:
     request = _request("a" * 40).model_dump()
     assert "credentials_allowed" not in request
     FixPreparationRequestV1.model_validate({**request, "credentials_allowed": []})
@@ -232,7 +253,9 @@ def test_legacy_empty_credential_field_is_accepted_but_forwarding_is_rejected():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
-def test_cli_outputs_and_in_progress_archive_are_private_in_shared_directory(tmp_path, monkeypatch):
+def test_cli_outputs_and_in_progress_archive_are_private_in_shared_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace, _ = _workspace(tmp_path)
     commit = existing_suite(workspace)
     request_path = tmp_path / "request.json"
@@ -244,9 +267,9 @@ def test_cli_outputs_and_in_progress_archive_are_private_in_shared_directory(tmp
     model = ScriptedModel([*patch(), finish("done")], [*suite_commands(), finish("approved")])
     _local_runtime(monkeypatch, tmp_path, model)
     original_writestr = zipfile.ZipFile.writestr
-    writes_checked = []
+    writes_checked: list[str] = []
 
-    def private_writestr(archive, name, data, *args, **kwargs):
+    def private_writestr(archive: Any, name: str, data: Any, *args: Any, **kwargs: Any) -> Any:
         # Check the open archive before source/log bytes enter it, not just after close.
         assert stat.S_IMODE(os.fstat(archive.fp.fileno()).st_mode) == 0o600
         writes_checked.append(name)
@@ -282,7 +305,9 @@ def test_cli_outputs_and_in_progress_archive_are_private_in_shared_directory(tmp
     assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in shared.iterdir())
 
 
-def test_default_outputs_allow_repeated_runs_from_inside_the_repository(tmp_path, monkeypatch):
+def test_default_outputs_allow_repeated_runs_from_inside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace, _ = _workspace(tmp_path)
     commit = existing_suite(workspace)
     request_path = tmp_path / "request.json"
@@ -303,8 +328,39 @@ def test_default_outputs_allow_repeated_runs_from_inside_the_repository(tmp_path
     assert not (workspace / "strix_runs").exists()
 
 
-def test_default_output_cannot_resolve_inside_source_checkout(tmp_path, monkeypatch):
+def test_default_output_cannot_resolve_inside_source_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     with pytest.raises(ValueError, match="set --output outside"):
         fix_cli._default_output(tmp_path)
     assert not (tmp_path / ".strix").exists()
+
+
+def test_summary_includes_followups_from_repair_and_reviewer() -> None:
+    request = _request("a" * 40)
+    attempt = FixPreparationAttempt(
+        attempt=1,
+        repair=RepairOutcome(
+            status=RepairStatus.COMPLETE,
+            summary="Patched.",
+            notes=["re-run the nightly suite"],
+        ),
+        workspace_digest="b" * 64,
+    )
+    result = FixPreparationResultV1(
+        state=PreparationState.READY,
+        stop_reason="Reviewed and approved.",
+        source_identity=request.candidate.source_identity,
+        candidate=request.candidate,
+        candidate_digest=request.candidate.digest(),
+        attempt_history=[attempt],
+        verifier=VerifierResult(
+            decision=VerificationDecision.VERIFIED,
+            summary="Approved.",
+            notes=["rotate the leaked token"],
+        ),
+    )
+    summary = fix_cli._summary(result)
+    assert "re-run the nightly suite" in summary
+    assert "rotate the leaked token" in summary

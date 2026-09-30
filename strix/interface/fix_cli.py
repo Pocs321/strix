@@ -126,11 +126,11 @@ def _summary(result: FixPreparationResultV1) -> str:
         gaps.append(result.blocker.user_action)
     if gaps:
         lines.extend(["", "## Remaining work", "", *dict.fromkeys(gaps)])
-    report = result.verifier or (
-        result.attempt_history[-1].repair if result.attempt_history else None
-    )
-    if report and report.notes:
-        lines.extend(["", "## Recommended follow-up", "", *dict.fromkeys(report.notes)])
+    notes = list(result.attempt_history[-1].repair.notes) if result.attempt_history else []
+    if result.verifier:
+        notes.extend(result.verifier.notes)
+    if notes:
+        lines.extend(["", "## Recommended follow-up", "", *dict.fromkeys(notes)])
     return "\n".join(lines) + "\n"
 
 
