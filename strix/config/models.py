@@ -807,7 +807,7 @@ def _install_openrouter_stream_cost_capture() -> None:
             # survives between turns.
             body = super().transform_request(*args, **kwargs)
             agent_id = request_log.current_call_context().agent_id
-            if agent_id:
+            if agent_id and load_settings().llm.openrouter_sticky_sessions:
                 session_id = _OPENROUTER_SESSION_IDS.setdefault(agent_id, str(uuid.uuid4()))
                 body.setdefault("session_id", session_id)
             return body

@@ -384,5 +384,8 @@ def test_openrouter_request_carries_agent_session_id() -> None:
         session_id = body()["session_id"]
         assert str(uuid.UUID(session_id)) == session_id
         assert body()["session_id"] == session_id
+        with patch("strix.config.models.load_settings") as settings:
+            settings.return_value.llm.openrouter_sticky_sessions = False
+            assert "session_id" not in body()
     finally:
         request_log.reset_call_context(token)
