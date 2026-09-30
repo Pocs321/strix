@@ -75,6 +75,10 @@ def git_metadata_archive(workspace: Path) -> bytes:
         (clone / "config").write_text(config)
         output = io.BytesIO()
         with tarfile.open(fileobj=output, mode="w") as archive:
+            # Packed refs can leave refs/ empty; Git still requires the directory.
+            refs = tarfile.TarInfo(".git/refs")
+            refs.type, refs.mode = tarfile.DIRTYPE, 0o755
+            archive.addfile(refs)
             for path in sorted(clone.rglob("*")):
                 relative = path.relative_to(clone)
                 if relative.parts[0] in {"hooks", "logs"} or not path.is_file():
@@ -160,6 +164,7 @@ changed = set(
     git("diff", "--name-only", "--no-renames", "-z", base).decode().split("\0")
 ) - {""}
 changed |= current - original
+changed.discard(str(pathlib.Path(sys.argv[3]).relative_to(root)))
 manifest = []
 with tarfile.open(sys.argv[3], "w") as archive:
     for index, name in enumerate(sorted(changed)):

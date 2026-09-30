@@ -6,11 +6,12 @@ import json
 import shlex
 import sys
 import zipfile
-from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from agents import Model, RunConfig
+from agents import Agent, Model, RunConfig, RunContextWrapper
+from agents.exceptions import MaxTurnsExceeded
 from agents.items import ModelResponse
 from agents.sandbox import SandboxRunConfig
 from agents.tool import CustomTool
@@ -22,12 +23,19 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 
+import strix.core.hooks as hooks_module
 from strix.config.models import _completed_stream_event
+from strix.core.hooks import BudgetExceededError, ReportUsageHooks
 from strix.fix import PreparationState
 from strix.fix import runtime as fix_runtime
+from strix.fix.runtime import _FixHooks
 from strix.interface.fix_cli import _summary
 from tests.test_fix_reliability import environment, existing_suite
 from tests.test_fix_runtime import _request, _workspace
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def call(name: str, **arguments: Any) -> ResponseFunctionToolCall:
@@ -65,8 +73,8 @@ def suite_commands() -> list[Any]:
 
 
 class ScriptedModel(Model):
-    def __init__(self, repair: list[Any], review: list[Any]) -> None:
-        self.responses = {"repair": repair, "review": review}
+    def __init__(self, repair: list[Any], review: list[Any] | None = None) -> None:
+        self.responses = {"repair": repair, "review": review or []}
         self.inputs: dict[str, list[Any]] = {"repair": [], "review": []}
         self.tools: set[str] = set()
 
@@ -156,225 +164,106 @@ async def scenario(
 
 
 @pytest.mark.asyncio
-async def test_native_agents_review_executes_customer_and_regression_tests(tmp_path, monkeypatch):
-    model = ScriptedModel([*patch(), finish("done")], [*suite_commands(), finish("approved")])
-    result, env = await scenario(tmp_path, monkeypatch, model)
+async def test_single_agent_implements_runs_both_test_suites_and_exports(tmp_path, monkeypatch):
+    model = ScriptedModel([*patch(), *suite_commands(), finish("done", "Both suites passed")])
+    result, _env = await scenario(tmp_path, monkeypatch, model)
     assert result.state is PreparationState.READY, result.model_dump_json()
-    assert result.attempts == 1
-    assert {"exec_command", "apply_patch", "agent_finish"} <= model.tools
-    assert not {"create_agent", "finish_scan", "record_coverage", "run_command"} & model.tools
-    assert len(result.checks) == 4
-    assert all(c.exit_code == 0 for c in result.checks)
+    assert result.validation_mode == "single_agent"
+    assert not model.inputs["review"]
+    assert result.verifier is None
+    assert result.completion.turns_used == 5
     assert all("Ran 1 test" in c.output for c in result.checks[-2:])
-    assert result.prepared_source_digest == result.verifier.source_digest == env.validated_digest
-    assert (tmp_path / "fix-agents.db").exists()
-    with zipfile.ZipFile(tmp_path / "prepared.zip") as archive:
-        assert "files/tests/test_security.py" in archive.namelist()
-        assert len(json.loads(archive.read("execution.json"))) == 4
-        sessions = json.loads(archive.read("agent-sessions.json"))
-        assert sessions["repair"]
-        assert sessions["review"]
-        assert b"agent_finish" in archive.read("tool-results.jsonl")
+    assert {"exec_command", "apply_patch", "agent_finish"} <= model.tools
+    assert not {"create_agent", "finish_scan", "record_coverage"} & model.tools
+    with zipfile.ZipFile(tmp_path / "prepared.zip") as artifact:
+        assert "files/tests/test_security.py" in artifact.namelist()
+    assert "Both suites passed" in _summary(result)
 
 
 @pytest.mark.asyncio
-async def test_reviewer_corrections_are_validated_and_delivered(tmp_path, monkeypatch):
+async def test_agent_corrects_failed_test_in_same_conversation(tmp_path, monkeypatch):
     model = ScriptedModel(
-        [*patch("incorrect"), finish("done")],
-        [
-            *suite_commands(),
-            *patch(),
-            *suite_commands(),
-            finish("approved", "Corrected patch; both suites now pass."),
-        ],
-    )
-    result, _ = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.READY, result.model_dump_json()
-    assert any(c.exit_code == 1 for c in result.checks)
-    assert all(c.exit_code == 0 for c in result.checks[-2:])
-    assert result.prepared_source_digest != result.attempt_history[0].repair.source_digest
-    with zipfile.ZipFile(tmp_path / "prepared.zip") as archive:
-        assert b"return 'safe'" in archive.read("files/app.py")
-
-
-@pytest.mark.asyncio
-async def test_review_feedback_resumes_both_sessions(tmp_path, monkeypatch):
-    model = ScriptedModel(
-        [*patch("incorrect"), finish("done"), *patch(), finish("done")],
-        [
-            *suite_commands(),
-            finish("changes_requested", "The regression fails: return the safe value."),
-            *suite_commands(),
-            finish("approved"),
-        ],
-    )
-    result, _ = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.READY, result.model_dump_json()
-    assert result.attempts == 2
-    assert "The regression fails" in json.dumps(model.inputs["repair"][-1])
-    assert "changes_requested" in json.dumps(model.inputs["review"][-1])
-
-
-@pytest.mark.asyncio
-async def test_invalid_finish_outcome_is_corrected_through_native_tool(tmp_path, monkeypatch):
-    model = ScriptedModel(
-        [*patch(), finish("approved"), finish("done")], [*suite_commands(), finish("approved")]
-    )
-    result, _ = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.READY, result.model_dump_json()
-    assert "Choose an outcome" in json.dumps(model.inputs["repair"][-1])
-
-
-@pytest.mark.asyncio
-async def test_missing_finish_summary_is_corrected_without_crashing(tmp_path, monkeypatch):
-    model = ScriptedModel(
-        [*patch(), call("agent_finish", outcome="done"), finish("done")],
-        [*suite_commands(), call("agent_finish", outcome="approved"), finish("approved")],
-    )
-    result, _ = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.READY, result.model_dump_json()
-    for role in ("repair", "review"):
-        error = json.dumps(model.inputs[role][-1])
-        assert "result_summary" in error and "Field required" in error
-    with zipfile.ZipFile(tmp_path / "prepared.zip") as archive:
-        assert b"Field required" in archive.read("tool-results.jsonl")
-
-
-@pytest.mark.asyncio
-async def test_completion_limitations_and_recommendations_survive_approval(tmp_path, monkeypatch):
-    limitation = "Production integration still requires customer credentials."
-    note = "Consider wider integration coverage."
-    model = ScriptedModel(
-        [
-            *patch(),
-            call(
-                "agent_finish",
-                outcome="done",
-                result_summary="Patch ready.",
-                open_items=["Reviewer must run existing tests."],
-                final_recommendations=["Repair follow-up."],
-            ),
-        ],
-        [
-            *suite_commands(),
-            call(
-                "agent_finish",
-                outcome="approved",
-                result_summary="Tests passed.",
-                open_items=[limitation],
-                final_recommendations=[note],
-            ),
-        ],
+        [*patch("still unsafe"), *suite_commands(), *patch(), *suite_commands(), finish("done")]
     )
     result, _ = await scenario(tmp_path, monkeypatch, model)
     assert result.state is PreparationState.READY
-    assert result.verifier.gaps == result.gaps == [limitation]
-    assert result.verifier.notes == [note]
-    assert result.attempt_history[0].repair.notes == ["Repair follow-up."]
-    assert "Reviewer must run existing tests." in json.dumps(model.inputs["review"][0])
-    assert limitation in _summary(result)
-    assert note in _summary(result)
+    assert any(c.exit_code != 0 for c in result.checks)
+    assert all(c.exit_code == 0 for c in result.checks[-2:])
+    assert not model.inputs["review"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limited_role", ["repair", "review"])
-async def test_role_budget_is_cumulative_across_feedback(tmp_path, monkeypatch, limited_role):
-    model = ScriptedModel(
-        [*patch("incorrect"), finish("done"), *patch(), finish("done")],
-        [
-            *suite_commands(),
-            finish("changes_requested", "Correct the return value."),
-            *suite_commands(),
-            finish("approved"),
-        ],
-    )
-    result, _ = await scenario(
-        tmp_path,
-        monkeypatch,
-        model,
-        repair_turns=5 if limited_role == "repair" else 20,
-        review_turns=4 if limited_role == "review" else 20,
-    )
+@pytest.mark.parametrize("end", ["blocked", "limit"])
+async def test_blocked_or_capped_agent_discards_patch(tmp_path, monkeypatch, end):
+    model = ScriptedModel([*patch(), finish("blocked", "Database unavailable")])
+    result, _ = await scenario(tmp_path, monkeypatch, model, turns=2 if end == "limit" else 10)
     assert result.state is PreparationState.BLOCKED
-    assert result.attempts == 2
-    assert "budget" in result.stop_reason
-    assert len(model.inputs[limited_role]) == (5 if limited_role == "repair" else 4)
-    assert model.responses[limited_role]  # The budget stopped execution, not a scripted completion.
-    resumed_input = json.dumps(model.inputs[limited_role][3])
-    assert (
-        f"4/{5 if limited_role == 'repair' else 4} turns used across all handoffs" in resumed_input
-    )
-    assert "in-progress work is discarded" not in resumed_input
-    assert result.final_file_manifest
+    assert not result.final_file_manifest
+    assert not (tmp_path / "prepared.zip").exists()
+    assert len(model.inputs["repair"]) <= (2 if end == "limit" else 3)
 
 
 @pytest.mark.asyncio
-async def test_blocked_tests_keep_patch_without_reopening_repair(tmp_path, monkeypatch):
+async def test_native_lifecycle_retries_invalid_outcome(tmp_path, monkeypatch):
+    model = ScriptedModel([*patch(), finish("approved"), *suite_commands(), finish("done")])
+    result, _ = await scenario(tmp_path, monkeypatch, model)
+    assert result.state is PreparationState.READY
+    assert result.completion.turns_used == 6
+
+
+@pytest.mark.asyncio
+async def test_resume_consumes_remaining_turn_allowance(tmp_path):
+
+    env = environment(tmp_path / "source", tmp_path)
+    env.turns_used = 299
+    env.max_repair_turns = 500
+    saved = []
+    env.turn_sink = saved.append
+    hooks = _FixHooks(env)
+
+    context = RunContextWrapper(context={})
+    await hooks.on_llm_start(context, Agent(name="fix"), "", [])
+    with pytest.raises(MaxTurnsExceeded):
+        await hooks.on_llm_start(context, Agent(name="fix"), "", [])
+    assert saved == [300]
+
+
+@pytest.mark.asyncio
+async def test_completion_recommendations_are_in_summary(tmp_path, monkeypatch):
     model = ScriptedModel(
-        [*patch(), finish("done")],
         [
-            shell("exit 1"),
-            finish("blocked", "Customer unit tests require an unavailable database."),
-        ],
+            *patch(),
+            *suite_commands(),
+            call(
+                "agent_finish",
+                outcome="done",
+                result_summary="Fixed and tested",
+                final_recommendations=["Run the nightly suite"],
+            ),
+        ]
     )
     result, _ = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.BLOCKED
-    assert result.attempts == 1
-    assert result.final_file_manifest
-    assert result.checks[-1].exit_code == 1
+    assert "Run the nightly suite" in _summary(result)
 
 
 @pytest.mark.asyncio
-async def test_budget_interruption_saves_partial_patch(tmp_path, monkeypatch):
-    model = ScriptedModel([*patch(), shell("pwd")], [])
-    result, _ = await scenario(tmp_path, monkeypatch, model, turns=2)
-    assert result.state is PreparationState.BLOCKED, result.model_dump_json()
-    assert result.final_file_manifest
-    assert result.verifier is None
-    assert "budget" in result.stop_reason.lower()
+async def test_fix_respects_live_scan_budget_without_double_counting(tmp_path, monkeypatch):
 
-
-@pytest.mark.asyncio
-async def test_plain_prose_uses_native_lifecycle_recovery(tmp_path, monkeypatch):
-    model = ScriptedModel(
-        [*patch(), "All done", finish("done")], [*suite_commands(), finish("approved")]
+    recorded = []
+    state = SimpleNamespace(
+        get_total_llm_cost=lambda: 2.0, record_sdk_usage=lambda **kwargs: recorded.append(kwargs)
     )
-    result, _ = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.READY, result.model_dump_json()
-    assert "lifecycle tool" in json.dumps(model.inputs["repair"][-1])
-
-
-@pytest.mark.asyncio
-async def test_patch_changed_after_approval_is_not_delivered_as_ready(tmp_path, monkeypatch):
-    original = fix_runtime._FixHooks.on_tool_end
-
-    async def change_after_finish(hooks, context, agent, tool, result):
-        await original(hooks, context, agent, tool, result)
-        if hooks.completion_digest:
-            (Path(hooks.environment.sandbox_workspace) / "app.py").write_text(
-                "def result():\n    return 'changed after approval'\n"
-            )
-
-    monkeypatch.setattr(fix_runtime._FixHooks, "on_tool_end", change_after_finish)
-    model = ScriptedModel([*patch(), finish("done")], [*suite_commands(), finish("approved")])
-    result, env = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.BLOCKED, result.model_dump_json()
-    assert "changed after review" in result.stop_reason
-    assert result.verifier.source_digest != env.validated_digest
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("chat_tools", [True, False])
-async def test_native_filesystem_patch_is_shared_with_reviewer(tmp_path, monkeypatch, chat_tools):
-    monkeypatch.setattr(fix_runtime, "uses_chat_completions_tool_schema", lambda *_: chat_tools)
-    production_patch = (
-        "*** Begin Patch\n*** Update File: app.py\n@@\n"
-        "-    return 'unsafe'\n+    return 'safe'\n*** End Patch"
-    )
-    model = ScriptedModel(
-        [call("apply_patch", patch=production_patch), patch()[1], finish("done")],
-        [*suite_commands(), finish("approved")],
-    )
-    result, _ = await scenario(tmp_path, monkeypatch, model)
-    assert result.state is PreparationState.READY, result.model_dump_json()
-    assert all(c.exit_code == 0 for c in result.checks)
+    monkeypatch.setattr(hooks_module, "get_global_report_state", lambda: state)
+    env = environment(tmp_path / "source", tmp_path)
+    shared = ReportUsageHooks(model="test", max_budget_usd=10)
+    env.scan_hooks = shared
+    hooks = _FixHooks(env)
+    context = RunContextWrapper(context={"agent_id": "fix", "parent_id": "root"})
+    shared.set_max_budget_usd(1)
+    with pytest.raises(BudgetExceededError):
+        await hooks.on_llm_end(
+            context,
+            Agent(name="fix"),
+            ModelResponse(output=[], usage=Usage(requests=1), response_id=None),
+        )
+    assert len(recorded) == 1

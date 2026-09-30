@@ -152,6 +152,7 @@ class ReportedCheck(ContractModel):
 
 
 class FindingContext(ContractModel):
+    validation_status: Literal["confirmed", "unconfirmed"] | None = None
     title: str = ""
     description: str = ""
     evidence: str = ""
@@ -187,6 +188,8 @@ class FixCandidateV1(ContractModel):
         data = self.model_dump(mode="json")
         if self.finding is None:
             data.pop("finding", None)  # Preserve digests for stored legacy candidates.
+        if self.finding is not None and self.finding.validation_status is None:
+            data["finding"].pop("validation_status", None)
         if self.blocker is None:
             data.pop("blocker", None)
         if data.get("reproduction") and data["reproduction"].get("command"):
@@ -221,7 +224,7 @@ class FixPreparationRequestV1(ContractModel):
 
     @property
     def repair_turn_limit(self) -> int:
-        return self.max_repair_turns or self.max_agent_turns or 400
+        return min(self.max_repair_turns or self.max_agent_turns or 300, 300)
 
     @property
     def review_turn_limit(self) -> int:
@@ -285,7 +288,8 @@ class FileManifestEntry(ContractModel):
 
 class FixPreparationResultV1(ContractModel):
     version: Literal["1"] = "1"
-    validation_mode: Literal["agent_review"] = "agent_review"
+    validation_mode: Literal["agent_review", "single_agent"] = "single_agent"
+    completion: RepairOutcome | None = None
     prepared_source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     state: PreparationState
     stop_reason: str
@@ -372,6 +376,9 @@ def candidate_from_legacy_report(
         draft_edits=edits,
         reproduction=ReproductionSpec(instructions=reproduction) if reproduction else None,
         finding=FindingContext(
+            validation_status=cast(
+                "Literal['confirmed', 'unconfirmed'] | None", report.get("validation_status")
+            ),
             title=str(report.get("title") or ""),
             description=str(report.get("description") or report.get("technical_analysis") or ""),
             evidence=str(report.get("evidence") or report.get("poc_description") or ""),

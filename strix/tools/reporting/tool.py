@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agents import RunContextWrapper, function_tool
 
@@ -447,6 +447,7 @@ _FIX_CANDIDATE_FIELDS = frozenset(
         "evidence",
         "fix_verification",
         "fix_candidate_blocker",
+        "validation_status",
     }
 )
 
@@ -562,6 +563,13 @@ def _collect_update_changes(  # noqa: PLR0912, PLR0915
         value = clean_optional(fields.get(name))
         if value is not None:
             changes[name] = value
+
+    validation_status = fields.get("validation_status")
+    if validation_status is not None:
+        if validation_status not in {"confirmed", "unconfirmed"}:
+            errors.append("validation_status must be confirmed or unconfirmed")
+        else:
+            changes["validation_status"] = validation_status
 
     confidence = clean_optional(fields.get("confidence"))
     if confidence is not None:
@@ -978,6 +986,7 @@ async def _do_create(  # noqa: PLR0911 - explicit validation and persistence out
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    validation_status: Literal["confirmed", "unconfirmed"] = "unconfirmed",
     fix_candidate_blocker: FixCandidateBlocker | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
@@ -1074,6 +1083,7 @@ async def _do_create(  # noqa: PLR0911 - explicit validation and persistence out
             "assumptions": assumptions,
             "counterevidence": counterevidence,
             "confidence": confidence,
+            "validation_status": validation_status,
             "confidence_rationale": confidence_rationale,
             "severity_change_conditions": severity_change_conditions,
             "fix_effort": fix_effort,
@@ -1188,6 +1198,7 @@ async def create_vulnerability_report(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    validation_status: Literal["confirmed", "unconfirmed"] = "unconfirmed",
     fix_candidate_blocker: FixCandidateBlocker | None = None,
 ) -> str:
     """File a vulnerability report — one report per fully-verified finding.
@@ -1508,6 +1519,9 @@ async def create_vulnerability_report(
             you checked. Distinguish executed checks from reasoning and
             name testing gaps. Repair and independent testing happen later;
             this field does not claim the draft is verified.
+        validation_status: Record the validation agent's conclusion: confirmed only
+            when the vulnerability is established, unconfirmed for unresolved source
+            concerns. Confirmed source-backed reports start a dedicated Fix agent.
         fix_candidate_blocker: With repository source attached, provide either
             code_locations containing paired fix_before/fix_after edits and
             fix_verification, or this object with a concrete reason why you
@@ -1615,6 +1629,7 @@ async def create_vulnerability_report(
         fix_verification=fix_verification,
         fix_pr_body=fix_pr_body,
         fix_candidate_blocker=fix_candidate_blocker,
+        validation_status=validation_status,
         agent_id=agent_id,
         agent_name=agent_name,
     )
@@ -1650,6 +1665,7 @@ async def update_vulnerability_report(
     http_exchange_ids: list[str] | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    validation_status: Literal["confirmed", "unconfirmed"] | None = None,
     fix_candidate_blocker: FixCandidateBlocker | None = None,
     contextual_cvss_reasoning: str | None = None,
 ) -> str:
@@ -1774,6 +1790,7 @@ async def update_vulnerability_report(
         "fix_verification": fix_verification,
         "fix_pr_body": fix_pr_body,
         "fix_candidate_blocker": fix_candidate_blocker,
+        "validation_status": validation_status,
         "contextual_cvss_reasoning": contextual_cvss_reasoning,
     }
     if http_exchange_warning and all(value is None for value in fields.values()):

@@ -14,19 +14,15 @@ from pathlib import Path
 from typing import Literal
 
 from strix.fix.contracts import (
-    BlockerKind,
     CheckResult,
     FileManifestEntry,
     FixCandidateV1,
     FixPreparationAttempt,
     FixPreparationRequestV1,
     FixPreparationResultV1,
-    PreparationBlocker,
     PreparationState,
     RepairOutcome,
     RepairStatus,
-    VerificationDecision,
-    VerifierResult,
 )
 
 
@@ -50,10 +46,6 @@ class PreparationContext:
 RepairAgent = Callable[
     [PreparationContext, list[CheckResult]],
     Awaitable[RepairOutcome],
-]
-IndependentVerifier = Callable[
-    [PreparationContext, list[CheckResult]],
-    Awaitable[VerifierResult],
 ]
 SourceVerifier = Callable[[PreparationContext], Awaitable[bool]]
 EvidenceReader = Callable[[], Awaitable[list[CheckResult]]]
@@ -221,194 +213,70 @@ async def _verify_source(context: PreparationContext) -> bool:
     return status_process.returncode == 0 and not status_output.strip(b"\x00")
 
 
-def _result(
-    context: PreparationContext,
-    *,
-    state: PreparationState,
-    reason: str,
-    started: float,
-    checks: list[CheckResult] | None = None,
-    verifier: VerifierResult | None = None,
-    gaps: list[str] | None = None,
-    manifest: list[FileManifestEntry] | None = None,
-    diff_summary: str = "",
-    artifact_ref: str | None = None,
-    attempt_history: list[FixPreparationAttempt] | None = None,
-    blocker: PreparationBlocker | None = None,
-) -> FixPreparationResultV1:
-    return FixPreparationResultV1(
-        state=state,
-        validation_mode="agent_review",
-        prepared_source_digest=(
-            verifier.source_digest
-            if verifier is not None
-            else context.feedback[-1].repair.source_digest
-            if context.feedback
-            else None
-        ),
-        stop_reason=reason,
-        source_identity=context.candidate.source_identity,
-        candidate=context.candidate,
-        candidate_digest=context.candidate.digest(),
-        final_file_manifest=manifest or [],
-        artifact_ref=artifact_ref,
-        changed_files=[entry.path for entry in manifest or []],
-        diff_summary=diff_summary,
-        checks=checks or [],
-        verifier=verifier,
-        attempt_history=attempt_history or [],
-        gaps=gaps or [],
-        blocker=blocker,
-        attempts=context.attempt,
-        elapsed_seconds=time.monotonic() - started,
-    )
-
-
-async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
+async def prepare_fix(  # noqa: PLR0911
     request: FixPreparationRequestV1,
     workspace: Path,
     *,
     repair: RepairAgent,
-    verify: IndependentVerifier,
     manifest_builder: ManifestBuilder = build_git_manifest,
     source_verifier: SourceVerifier = _verify_source,
     evidence_reader: EvidenceReader | None = None,
     cancelled: CancellationCheck = lambda: False,
 ) -> FixPreparationResultV1:
-    """Run repair/review conversations; agents own setup, tests and corrections."""
+    """One native agent owns implementation and testing; export successful work only."""
     started = time.monotonic()
     context = PreparationContext(request=request, workspace=workspace, candidate=request.candidate)
-    checks: list[CheckResult] = []
-    verifier: VerifierResult | None = None
-    repair_turns = review_turns = 0
+    completion: RepairOutcome | None = None
 
-    async def finish(
-        state: PreparationState,
-        reason: str,
-        *,
-        blocker: PreparationBlocker | None = None,
-        gaps: list[str] | None = None,
-    ) -> FixPreparationResultV1:
-        nonlocal checks
-        if evidence_reader:
-            checks = await evidence_reader()
-        manifest, summary, artifact = await manifest_builder(workspace)
-        return _result(
-            context,
+    async def finish(state: PreparationState, reason: str) -> FixPreparationResultV1:
+        manifest: list[FileManifestEntry] = []
+        summary, artifact = "", None
+        if state is PreparationState.READY:
+            manifest, summary, artifact = await manifest_builder(workspace)
+        return FixPreparationResultV1(
             state=state,
-            reason=reason,
-            started=started,
-            checks=checks,
-            verifier=verifier,
-            manifest=manifest,
+            stop_reason=reason,
+            source_identity=context.candidate.source_identity,
+            candidate=context.candidate,
+            candidate_digest=context.candidate.digest(),
+            completion=completion,
+            prepared_source_digest=(
+                completion.source_digest if completion and state is PreparationState.READY else None
+            ),
+            final_file_manifest=manifest,
+            changed_files=[entry.path for entry in manifest],
             diff_summary=summary,
             artifact_ref=artifact,
-            attempt_history=context.feedback,
-            blocker=blocker,
-            gaps=gaps,
-        )
-
-    async def execute() -> FixPreparationResultV1:  # noqa: PLR0911, PLR0912 - terminal outcomes
-        nonlocal checks, verifier, repair_turns, review_turns
-        if cancelled():
-            raise PreparationCancelledError
-        if context.candidate.blocker:
-            return await finish(
-                PreparationState.BLOCKED,
-                context.candidate.blocker.reason,
-                gaps=[context.candidate.blocker.reason],
-            )
-        if not await source_verifier(context):
-            return await finish(
-                PreparationState.STALE,
-                "The repository no longer matches the finding source.",
-                blocker=PreparationBlocker(
-                    kind=BlockerKind.SOURCE,
-                    summary="The repository no longer matches the finding source.",
-                    user_action="Refresh the finding against the current repository revision.",
-                ),
-            )
-        # Location/snippet interpretation belongs to repair. Exact source identity is checked above.
-        while repair_turns < request.repair_turn_limit and review_turns < request.review_turn_limit:
-            if cancelled():
-                raise PreparationCancelledError
-            context.attempt += 1
-            verifier = None
-            record = FixPreparationAttempt(
-                attempt=context.attempt,
-                repair=RepairOutcome(status=RepairStatus.INCOMPLETE, summary="Repair started."),
-                workspace_digest=await workspace_digest(workspace),
-            )
-            context.feedback.append(record)
-            record.repair = await repair(context, checks)
-            repair_turns += max(1, record.repair.turns_used)
-            checks = await evidence_reader() if evidence_reader else record.repair.command_results
-            record.checks = list(checks)
-            record.workspace_digest = await workspace_digest(workspace)
-            manifest, _, _ = await manifest_builder(workspace)
-            if record.repair.status is not RepairStatus.COMPLETE:
-                return await finish(
-                    PreparationState.BLOCKED,
-                    record.repair.summary,
-                    blocker=record.repair.blocker,
-                    gaps=record.repair.gaps,
-                )
-            if not manifest:
-                return await finish(
-                    PreparationState.BLOCKED,
-                    "Repair completed without a deliverable patch.",
-                )
-            if cancelled():
-                raise PreparationCancelledError
-            # Review can investigate even incomplete validation and run the missing checks itself.
-            verifier = await verify(context, checks)
-            review_turns += max(1, verifier.turns_used)
-            record.verifier = verifier
-            if evidence_reader:
-                checks = await evidence_reader()
-                record.checks = list(checks)
-            if verifier.blocker:
-                return await finish(
-                    PreparationState.BLOCKED,
-                    verifier.summary,
-                    blocker=verifier.blocker,
-                    gaps=verifier.gaps,
-                )
-            if verifier.decision is VerificationDecision.REJECTED:
-                record.repair.gaps.extend(verifier.gaps or [verifier.summary])
-                continue
-            if verifier.decision is not VerificationDecision.VERIFIED:
-                return await finish(PreparationState.BLOCKED, verifier.summary, gaps=verifier.gaps)
-            # Test selection, failures, reruns and coverage belong to the reviewer.
-            # Review may correct the patch. Approval binds to its final snapshot,
-            # not the earlier repair checkpoint.
-            if verifier.source_digest != await workspace_digest(workspace):
-                return await finish(
-                    PreparationState.BLOCKED,
-                    "The deliverable changed after review; the approved patch cannot be delivered.",
-                )
-            return await finish(
-                PreparationState.READY,
-                "Independent review approved the draft PR. See the review for validation results.",
-                gaps=verifier.gaps,
-            )
-        return await finish(
-            PreparationState.BLOCKED,
-            "The agent turn budget was reached; partial work was retained.",
+            checks=await evidence_reader()
+            if evidence_reader
+            else (completion.command_results if completion else []),
+            attempts=1 if completion else 0,
+            elapsed_seconds=time.monotonic() - started,
         )
 
     try:
         async with asyncio.timeout(request.timeout_seconds):
-            return await execute()
+            if cancelled():
+                raise PreparationCancelledError  # noqa: TRY301
+            if context.candidate.blocker:
+                return await finish(PreparationState.BLOCKED, context.candidate.blocker.reason)
+            if not await source_verifier(context):
+                return await finish(PreparationState.STALE, "The finding source no longer matches.")
+            completion = await repair(context, [])
+            if cancelled():
+                raise PreparationCancelledError  # noqa: TRY301
+            if completion.status is not RepairStatus.COMPLETE:
+                return await finish(PreparationState.BLOCKED, completion.summary)
+            manifest, _, _ = await build_git_manifest(workspace)
+            if not manifest:
+                return await finish(PreparationState.BLOCKED, "The agent produced no patch.")
+            if completion.source_digest != await workspace_digest(workspace):
+                return await finish(PreparationState.BLOCKED, "Source changed after completion.")
+            return await finish(PreparationState.READY, completion.summary)
     except PreparationCancelledError:
         return await finish(PreparationState.FAILED, "Fix preparation was cancelled.")
     except TimeoutError:
         return await finish(PreparationState.FAILED, "Fix preparation exceeded its time limit.")
     except Exception as error:
-        logging.getLogger(__name__).exception(
-            "Fix preparation failed during attempt %s", context.attempt
-        )
-        return await finish(
-            PreparationState.FAILED,
-            f"Fix preparation stopped after {type(error).__name__}; partial work was retained.",
-        )
+        logging.getLogger(__name__).exception("Fix preparation failed")
+        return await finish(PreparationState.FAILED, f"Fix stopped after {type(error).__name__}.")

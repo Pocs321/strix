@@ -16,8 +16,7 @@ from tests.test_fix_reliability import environment
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("review", [False, True])
-async def test_repeated_native_command_warns_then_agent_can_finish(tmp_path, monkeypatch, review):
+async def test_repeated_native_command_warns_then_agent_can_finish(tmp_path, monkeypatch):
     # Interleaved commands and different SDK chunk IDs must not hide the repeated read.
     repeated = [
         shell("cat app.py"),
@@ -26,14 +25,10 @@ async def test_repeated_native_command_warns_then_agent_can_finish(tmp_path, mon
         shell("ls tests"),
         shell("cat app.py"),
     ]
-    model = ScriptedModel(
-        [*patch(), *([] if review else repeated), finish("done")],
-        [*(repeated if review else []), *suite_commands(), finish("approved")],
-    )
+    model = ScriptedModel([*patch(), *repeated, *suite_commands(), finish("done")])
     result, _ = await scenario(tmp_path, monkeypatch, model)
     assert result.state is PreparationState.READY, result.model_dump_json()
-    role = "review" if review else "repair"
-    assert any("[Repeated command]" in json.dumps(turn) for turn in model.inputs[role])
+    assert any("[Repeated command]" in json.dumps(turn) for turn in model.inputs["repair"])
     # The warning does not rewrite command evidence or replace required test execution.
     assert all(check.exit_code == 0 for check in result.checks)
     assert all("Ran 1 test" in check.output for check in result.checks[-2:])

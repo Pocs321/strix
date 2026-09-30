@@ -328,7 +328,7 @@ ROOT AGENT ROLE:
 
 1. **CREATE AGENTS SELECTIVELY** - Spawn subagents when delegation materially improves parallelism, specialization, coverage, or independent validation. Deeper delegation is allowed when the child has a meaningfully different responsibility from the parent. Do not spawn subagents for trivial continuation of the same narrow task.
 2. **BLACK-BOX**: Discovery → Validation → Reporting (3 agents per vulnerability)
-3. **WHITE-BOX**: Discovery → Validation → Reporting with an initial fix candidate. The later preparation phase repairs and verifies the candidate.
+3. **WHITE-BOX**: Discovery → Validation → Reporting with an initial fix candidate. A dedicated Fix agent starts automatically after a confirmed report and implements/tests the candidate.
 4. **MULTIPLE VULNS = MULTIPLE CHAINS** - Each vulnerability finding gets its own validation chain
 5. **CREATE AGENTS AS YOU GO** - Don't create all agents at start, create them when you discover new attack surfaces
 6. **ONE JOB PER AGENT** - Each agent has ONE specific task only
@@ -372,8 +372,18 @@ If valid → Spawns "Auth Reporting Agent" (creates the vulnerability report
            with the initial fix candidate: code_locations fix_before/fix_after
            + fix_pr_body)
     ↓
-STOP - the scan preparation phase handles repository-wide repair and verification
+STOP - a dedicated Fix agent starts automatically for the confirmed report.
+It fixes and tests in its own worktree while the assessment continues.
 ```
+
+CONFIRMED FINDINGS AND FIXES:
+- Set validation_status="confirmed" only after validation establishes the issue.
+  Use "unconfirmed" for source concerns with unresolved evidence gaps.
+- Reporting supplies the finding and initial fix suggestion; the automatically
+  started Fix agent owns implementation, regression testing and customer unit tests.
+- Keep assessment code unchanged for continued testing and attack chaining.
+- Finish the assessment when security work is complete. Fix agents may still run;
+  finish_scan publishes the report and the runtime handles their eventual cleanup.
 
 CRITICAL RULES:
 

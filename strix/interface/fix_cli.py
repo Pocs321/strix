@@ -40,9 +40,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artifact", type=Path, help="Patch/log archive; defaults beside the result."
     )
-    parser.add_argument("--max-agent-turns", type=int, help="Shared override for both agents.")
-    parser.add_argument("--max-repair-turns", type=int, help="Repair turns across handoffs (400).")
-    parser.add_argument("--max-review-turns", type=int, help="Review turns across handoffs (250).")
+    parser.add_argument("--max-agent-turns", type=int, help="Maximum total Fix turns (up to 300).")
+    parser.add_argument(
+        "--max-repair-turns",
+        type=int,
+        help="Maximum total Fix turns (300); larger values are capped.",
+    )
+    parser.add_argument("--max-review-turns", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--max-budget", type=float, help="Combined LLM cost budget in USD.")
     parser.add_argument("--timeout", type=int, help="Whole-job timeout in seconds.")
     return parser
@@ -110,7 +114,9 @@ async def _preflight() -> None:
 
 def _summary(result: FixPreparationResultV1) -> str:
     lines = ["# Fix preparation", "", f"Status: {result.state.value}", "", result.stop_reason]
-    if result.verifier:
+    if result.completion:
+        lines.extend(["", "## Fix", "", result.completion.summary])
+    elif result.verifier:
         lines.extend(["", "## Review", "", result.verifier.summary])
     elif result.attempt_history:
         lines.extend(["", "## Repair", "", result.attempt_history[-1].repair.summary])
@@ -127,6 +133,8 @@ def _summary(result: FixPreparationResultV1) -> str:
     if gaps:
         lines.extend(["", "## Remaining work", "", *dict.fromkeys(gaps)])
     notes = list(result.attempt_history[-1].repair.notes) if result.attempt_history else []
+    if result.completion:
+        notes.extend(result.completion.notes)
     if result.verifier:
         notes.extend(result.verifier.notes)
     if notes:
@@ -141,11 +149,12 @@ async def _execute(
     result = await run_isolated_fix_preparation(request, repo, artifact_path=artifact)
     write_secret_text(output, result.model_dump_json(indent=2) + "\n")
     write_secret_text(output.with_suffix(".md"), _summary(result))
-    with (
-        zipfile.ZipFile(artifact) as archive,
-        open_secret_file(output.with_suffix(".patch")) as stream,
-    ):
-        stream.write(archive.read("changes.patch"))
+    if result.state is PreparationState.READY:
+        with (
+            zipfile.ZipFile(artifact) as archive,
+            open_secret_file(output.with_suffix(".patch")) as stream,
+        ):
+            stream.write(archive.read("changes.patch"))
     return result
 
 

@@ -51,8 +51,6 @@ from strix.fix import (
     PreparationContext,
     RepairOutcome,
     RepairStatus,
-    VerificationDecision,
-    VerifierResult,
     build_git_manifest,
     build_git_patch,
     prepare_fix,
@@ -90,12 +88,11 @@ def _output_text(text: str, *, max_chars: int | None = _MAX_TOOL_OUTPUT_CHARS) -
 class _FixHooks(ReportUsageHooks):
     """Use Strix usage hooks and retain native tool evidence without deciding test success."""
 
-    def __init__(self, environment: _RuntimeEnvironment, *, review: bool = False) -> None:
-        self.max_turns = environment.max_review_turns if review else environment.max_repair_turns
+    def __init__(self, environment: _RuntimeEnvironment) -> None:
+        self.max_turns = min(environment.max_repair_turns, 300)
         super().__init__(model=load_settings().llm.model or "", max_turns=self.max_turns)
         self.environment = environment
-        self.review = review
-        self.turns = 0
+        self.turns = environment.turns_used
         self.completion_digest: str | None = None
         self._recent_commands: deque[tuple[str, int, str]] = deque(maxlen=_REPEAT_WINDOW)
         self._repetition_warning = False
@@ -110,8 +107,12 @@ class _FixHooks(ReportUsageHooks):
             raise BudgetExceededError("The configured LLM cost budget was reached.")
         if self.turns >= self.max_turns:
             raise MaxTurnsExceeded("The agent turn budget was reached.")
-        self.turns += 1
+        self._sync_scan_budget()
         await super().on_llm_start(context, agent, system_prompt, input_items)
+        self.turns += 1
+        self.environment.turns_used = self.turns
+        if self.environment.turn_sink:
+            self.environment.turn_sink(self.turns)
         if self._repetition_warning:
             input_items.append(
                 {
@@ -126,6 +127,12 @@ class _FixHooks(ReportUsageHooks):
                 }
             )
             self._repetition_warning = False
+
+    def _sync_scan_budget(self) -> None:
+        shared = self.environment.scan_hooks
+        if shared is not None:
+            self.set_max_budget_usd(shared.max_budget_usd)
+            self._budget_policy = shared.budget_policy
 
     def _track_repetition(self, command: dict[str, Any], exit_code: int, output: str) -> None:
         identity = json.dumps(
@@ -148,35 +155,32 @@ class _FixHooks(ReportUsageHooks):
             self._recent_commands.clear()
 
     def _turns_used(self, _context: RunContextWrapper[dict[str, Any]], /) -> int:
-        # SDK usage starts over when review sends repair feedback; our counter does not.
-        return self.turns
+        # SDK usage starts over when a persisted Fix task resumes; our counter does not.
+        return self.turns + 1
 
     def _turn_warning(
         self, _context: RunContextWrapper[dict[str, Any]], /, turns_used: int, stage: int
     ) -> str:
-        action = (
-            "Complete the essential tests and decide approved, changes_requested, or blocked."
-            if self.review
-            else "Finish the patch and focused regression, then hand off results and blockers."
-        )
+        action = "Finish the fix and required tests, or report blocked."
         urgency = ("Begin wrapping up.", "Wrap up now.", "Finish immediately.")[stage]
         return (
-            f"[Fix turn budget] {turns_used}/{self.max_turns} turns used across all handoffs. "
+            f"[Fix turn budget] {turns_used}/{self.max_turns} total turns used. "
             f"{urgency} {action} Do not start new investigations. If required validation is "
             "incomplete, report it honestly; do not claim approval. Call agent_finish with "
-            "result_summary and outcome. Partial work is retained if the budget is reached."
+            "result_summary and outcome. Incomplete fixes will not be delivered."
         )
 
     async def on_llm_end(
         self, context: RunContextWrapper[dict[str, Any]], agent: Agent[Any], response: ModelResponse
     ) -> None:
-        await super().on_llm_end(context, agent, response)
         self.environment.usage.record(
             agent_id=str(context.context["agent_id"]),
             agent_name=agent.name,
             model=load_settings().llm.model,
             usage=response.usage,
         )
+        self._sync_scan_budget()
+        await super().on_llm_end(context, agent, response)
 
     async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:  # noqa: ARG002 - SDK keyword signature.
         if not isinstance(context, ToolContext):
@@ -204,7 +208,7 @@ class _FixHooks(ReportUsageHooks):
             if not isinstance(completion, dict):
                 return
             completion = cast("dict[str, Any]", completion)
-            if completion.get("agent_completed") and completion.get("outcome") == "approved":
+            if completion.get("agent_completed") and completion.get("outcome") == "done":
                 await env.checkpoint()
                 self.completion_digest = env.validated_digest
             return
@@ -263,8 +267,14 @@ class _RuntimeEnvironment:
     initialized: bool = False
     base_commit: str = ""
     validated_digest: str | None = None
-    max_repair_turns: int = 400
-    max_review_turns: int = 250
+    max_repair_turns: int = 300
+    turns_used: int = 0
+    turn_sink: Callable[[int], None] | None = None
+    scan_hooks: ReportUsageHooks | None = None
+    parent_id: str | None = None
+    event_sink: Callable[[str, Any], None] | None = None
+    scan_context: dict[str, object] = field(default_factory=dict)
+    resume: bool = False
     max_budget_usd: float | None = None
     cancelled: Callable[[], bool] = lambda: False
     usage: LLMUsageLedger = field(default_factory=LLMUsageLedger)
@@ -344,9 +354,7 @@ class _RuntimeEnvironment:
         if not self.initialized:
             return
         # Git metadata is excluded from source export and stays within the SDK workspace root.
-        archive = (
-            Path(self.sandbox_workspace) / ".git" / f"strix-checkpoint-{self.execution_id}.tar"
-        )
+        archive = Path(self.sandbox_workspace) / f".strix-checkpoint-{self.execution_id}.tar"
         result = await self.session.exec(
             "python",
             "-c",
@@ -364,6 +372,7 @@ class _RuntimeEnvironment:
             )
         content = await self.session.read(archive)
         apply_checkpoint(self.workspace, content.read())
+        await self.session.exec("rm", "-f", "--", str(archive), shell=False, timeout=30)
         self.validated_digest = await workspace_digest(self.workspace)
 
 
@@ -439,24 +448,20 @@ class _Completion:
 class _FixAgent:
     """A task adapter around the standard Strix agent, session and lifecycle."""
 
-    def __init__(self, environment: _RuntimeEnvironment, *, review: bool = False) -> None:
+    def __init__(self, environment: _RuntimeEnvironment) -> None:
         self.environment = environment
-        self.agent_id = f"{environment.execution_id}-{'review' if review else 'repair'}"
-        self.outcomes = (
-            ["approved", "changes_requested", "blocked"] if review else ["done", "blocked"]
-        )
-        self.hooks = _FixHooks(environment, review=review)
+        self.agent_id = environment.execution_id
+        self.outcomes = ["done", "blocked"]
+        self.hooks = _FixHooks(environment)
         self.session = open_agent_session(
             self.agent_id, environment.workspace.parent / "fix-agents.db"
         )
         settings = load_settings()
         self.agent = build_strix_agent(
-            name="Independent fix reviewer" if review else "Fix repair agent",
+            name="Fix agent",
             is_root=False,
             base_tools=[think],
-            instructions_override=render_fix_prompt(
-                review=review, workspace_root=environment.sandbox_workspace
-            ),
+            instructions_override=render_fix_prompt(workspace_root=environment.sandbox_workspace),
             chat_completions_tools=uses_chat_completions_tool_schema(
                 settings.llm.model or "", settings
             ),
@@ -479,7 +484,7 @@ class _FixAgent:
         self.context = {
             "coordinator": environment.coordinator,
             "agent_id": self.agent_id,
-            "parent_id": environment.execution_id,
+            "parent_id": environment.parent_id or "fix-standalone",
             "sandbox_session": environment.session,
             "completion_outcomes": self.outcomes,
             "interactive": False,
@@ -489,17 +494,31 @@ class _FixAgent:
         start_turns = self.hooks.turns
         self.hooks.completion_digest = None
         env = self.environment
-        await env.coordinator.register(self.agent_id, self.agent.name, env.execution_id)
+        await env.coordinator.register(
+            self.agent_id,
+            self.agent.name,
+            env.parent_id or "fix-standalone",
+            skills=["fix_task"],
+            task="Implement and test the confirmed finding",
+        )
+        await env.coordinator.attach_runtime(
+            self.agent_id,
+            session=self.session,
+            task=asyncio.current_task(),
+            resumable=False,
+        )
         await env.coordinator.mark_running(self.agent_id)
         try:
             remaining = self.hooks.max_turns - start_turns
             if remaining <= 0:
                 return _Completion(
-                    "blocked", "The agent turn budget was reached; partial work was retained.", 0
+                    "blocked",
+                    "The agent turn budget was reached; no incomplete fix will be delivered.",
+                    0,
                 )
             result = await run_agent_loop(
                 agent=self.agent,
-                initial_input=_untrusted_prompt_data(payload),
+                initial_input=[] if env.resume else _untrusted_prompt_data(payload),
                 run_config=_run_config(env),
                 context=self.context,
                 max_turns=remaining,
@@ -507,6 +526,7 @@ class _FixAgent:
                 agent_id=self.agent_id,
                 interactive=False,
                 session=self.session,
+                event_sink=env.event_sink,
                 hooks=self.hooks,
             )
             completion = getattr(result, "final_output", None)
@@ -529,17 +549,18 @@ class _FixAgent:
                     )
             return _Completion(
                 "blocked",
-                "The agent stopped without a completion outcome; partial work was retained.",
+                "The agent stopped without a completion outcome; "
+                "no incomplete fix will be delivered.",
                 self.hooks.turns - start_turns,
             )
         except (MaxTurnsExceeded, BudgetExceededError):
             return _Completion(
                 "blocked",
-                "The agent budget was reached; partial work was retained.",
+                "The agent budget was reached; no incomplete fix will be delivered.",
                 self.hooks.turns - start_turns,
             )
         finally:
-            await env.checkpoint()
+            await env.coordinator.set_status(self.agent_id, "completed")
 
     async def close(self) -> None:
         self.session.close()
@@ -557,11 +578,7 @@ class ManagedRepairAgent(_FixAgent):
                 "repository_root": self.environment.sandbox_workspace,
                 "network_allowed": self.environment.network_allowed,
                 "requested_checks": [c.model_dump(mode="json") for c in context.request.checks],
-                "review_feedback": (
-                    context.feedback[-2].verifier.model_dump(mode="json")
-                    if len(context.feedback) > 1 and context.feedback[-2].verifier
-                    else None
-                ),
+                "scan_context": self.environment.scan_context,
             }
         )
         return RepairOutcome(
@@ -571,62 +588,8 @@ class ManagedRepairAgent(_FixAgent):
             summary=completion.summary,
             gaps=completion.open_items,
             notes=completion.recommendations,
-            turns_used=completion.turns,
+            turns_used=self.hooks.turns,
             command_results=self.environment.repair_checks[first_command:],
-            source_digest=self.environment.validated_digest,
-            blocker=PreparationBlocker(
-                kind=BlockerKind.EXTERNAL_CONFIGURATION,
-                summary=completion.summary,
-                user_action=completion.summary,
-            )
-            if completion.outcome == "blocked"
-            else None,
-        )
-
-
-class ManagedIndependentVerifier(_FixAgent):
-    def __init__(self, environment: _RuntimeEnvironment) -> None:
-        super().__init__(environment, review=True)
-
-    async def __call__(
-        self, context: PreparationContext, checks: list[CheckResult]
-    ) -> VerifierResult:
-        environment = self.environment
-        manifest, _, _ = await build_git_manifest(context.workspace)
-        patch = (await build_git_patch(context.workspace, manifest)).decode(errors="replace")
-        first_command = len(environment.repair_checks)
-        completion = await self.run(
-            {
-                "finding": _finding_assignment(context),
-                "repair": context.feedback[-1].repair.model_dump(
-                    mode="json", exclude={"command_results"}
-                ),
-                "repository_root": environment.sandbox_workspace,
-                "network_allowed": environment.network_allowed,
-                "diff": patch[:150_000],
-                "diff_truncated": len(patch) > 150_000,
-                "changed_files": [entry.model_dump(mode="json") for entry in manifest],
-                "requested_checks": [c.model_dump(mode="json") for c in context.request.checks],
-                "checks": [_command_preview(c, max_chars=2000) for c in checks],
-            }
-        )
-        extra_checks = environment.repair_checks[first_command:]
-        approved = completion.outcome == "approved"
-        return VerifierResult(
-            decision=(
-                VerificationDecision.VERIFIED
-                if approved
-                else VerificationDecision.REJECTED
-                if completion.outcome == "changes_requested"
-                else VerificationDecision.INCONCLUSIVE
-            ),
-            summary=completion.summary,
-            turns_used=completion.turns,
-            gaps=completion.open_items or ([] if approved else [completion.summary]),
-            notes=completion.recommendations,
-            review_basis="execution"
-            if any(c.status is CheckStatus.PASSED and c.exit_code == 0 for c in extra_checks)
-            else "code_review",
             source_digest=self.hooks.completion_digest,
             blocker=PreparationBlocker(
                 kind=BlockerKind.EXTERNAL_CONFIGURATION,
@@ -691,7 +654,7 @@ async def run_fix_preparation(
                 cwd=context.workspace,
                 timeout=30,
             )
-            matches = not status.strip()
+            matches = environment.resume or not status.strip()
         if matches and not environment.initialized:
             await environment.initialize()
         return matches
@@ -727,7 +690,6 @@ async def run_fix_preparation(
                 json.dumps(
                     {
                         "repair": await repair.session.get_items(),
-                        "review": await reviewer.session.get_items(),
                     }
                 ),
             )
@@ -742,32 +704,23 @@ async def run_fix_preparation(
         return manifest, summary, str(destination)
 
     environment.max_repair_turns = request.repair_turn_limit
-    environment.max_review_turns = request.review_turn_limit
     environment.max_budget_usd = request.max_budget_usd
     environment.cancelled = cancelled
 
-    await environment.coordinator.register(environment.execution_id, "Fix preparation", None)
     repair = ManagedRepairAgent(environment)
-    reviewer = ManagedIndependentVerifier(environment)
     try:
         result = await prepare_fix(
             request,
             environment.workspace,
             repair=repair,
-            verify=reviewer,
             evidence_reader=environment.current_checks,
             manifest_builder=build_artifact,
             source_verifier=verify_source,
             cancelled=cancelled,
         )
         return result.model_copy(update={"cost_usd": environment.usage.total_cost})
-    except asyncio.CancelledError:
-        # Save the checkpoint before the public entry point removes its temporary clone.
-        await build_artifact(environment.workspace)
-        raise
     finally:
         await repair.close()
-        await reviewer.close()
 
 
 async def run_isolated_fix_preparation(

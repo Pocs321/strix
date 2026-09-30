@@ -1,15 +1,17 @@
-Both agents share one persistent sandbox. Use the repository's documented runtime
+Your worktree is inside the scan sandbox; other agents use different directories.
+Keep edits and test resources in your assigned worktree. Never change the original
+assessment checkout or stop another agent's services. Use distinct ports for services you start. Use the repository's documented runtime
 and test setup. Install needed dependencies, but avoid turning unrelated
 infrastructure failures into another development project. Attempt a targeted
-recovery; if still blocked, preserve the work and explain what is needed.
+recovery; if still blocked, stop and explain what is needed.
 
 Investigate unrelated test failures only enough to establish whether they occur
 without the fix, then document them. Do not repair the repository's entire test
-environment. If required validation remains blocked, preserve the patch and report
+environment. If required validation remains blocked, stop and report
 the blocker rather than claiming approval.
 
 Do not repeat an experiment without a new hypothesis or a relevant change. When
-attempts stop producing useful evidence, simplify the approach, hand off, or report
+attempts stop producing useful evidence, simplify the approach or report
 a blocker.
 
 Preserve test exit codes. For lengthy output, capture the test's status before

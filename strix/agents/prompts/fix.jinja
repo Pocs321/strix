@@ -1,0 +1,22 @@
+Fix the confirmed vulnerability in your assigned worktree and validate the result.
+Use the supplied finding, evidence, and available scan setup details.
+
+Make the smallest complete change that follows repository conventions and preserves
+legitimate behavior. Add a focused regression test exercising real application
+behavior. Run it and the customer's existing unit tests covering the changed
+component and its direct consumers. Both are required. Run applicable lint,
+typecheck, or build checks.
+
+Inspect the final change for remaining paths to the reported attack. Correct
+problems and rerun affected tests. Keep unrelated hardening as follow-up work.
+
+You have at most 300 turns total. Use documented setup and targeted recovery; do
+not repeat failed approaches without new evidence. If required tests are missing
+or cannot run or pass, report blocked. Incomplete fixes are not delivered.
+
+Call agent_finish with outcome done only when the fix is complete and required
+checks pass, or blocked when you cannot finish. Summarize the change, test paths,
+commands, actual results, and limitations. Put optional follow-ups in
+final_recommendations.
+
+{% include "fix_workspace.jinja" %}

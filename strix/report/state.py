@@ -80,6 +80,7 @@ UPDATABLE_REPORT_FIELDS = frozenset(
         "assumptions",
         "counterevidence",
         "confidence",
+        "validation_status",
         "confidence_rationale",
         "severity_change_conditions",
         "fix_effort",
@@ -238,6 +239,7 @@ class ReportState:
         self._saved_vuln_ids: set[str] = set()
 
         self.caido_url: str | None = None
+        self.fix_finding_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_found_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_updated_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_deleted_callback: Callable[[dict[str, Any]], None] | None = None
@@ -357,6 +359,7 @@ class ReportState:
         http_exchange_ids: list[str] | None = None,
         fix_verification: str | None = None,
         fix_pr_body: str | None = None,
+        validation_status: str = "unconfirmed",
         finding_class: str | None = None,
         dependency_metadata: dict[str, str] | None = None,
         fix_candidate: dict[str, Any] | None = None,
@@ -421,6 +424,7 @@ class ReportState:
             report["fix_verification"] = fix_verification.strip()
         if fix_pr_body:
             report["fix_pr_body"] = fix_pr_body.strip()
+        report["validation_status"] = validation_status
         report["finding_class"] = (finding_class or "dynamic").strip().lower()
         if dependency_metadata:
             report["dependency_metadata"] = dependency_metadata
@@ -442,6 +446,7 @@ class ReportState:
         scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
 
         self.save_run_data()
+        self._notify_fix(report)
         return report_id
 
     def _deleted_vulnerability_reports(self) -> list[dict[str, Any]]:
@@ -558,6 +563,7 @@ class ReportState:
         )
 
         self.save_run_data()
+        self._notify_fix(report)
         return report
 
     def delete_vulnerability_report(
@@ -639,8 +645,16 @@ class ReportState:
         except OSError:
             logger.exception("could not remove %s", md_path)
 
+        self._notify_fix({**report, "deletion": entry})
         logger.info("Deleted vulnerability report %s - %s", report_id, report.get("title"))
         return report
+
+    def _notify_fix(self, report: dict[str, Any]) -> None:
+        if self.fix_finding_callback:
+            try:
+                self.fix_finding_callback(dict(report))
+            except Exception:
+                logger.exception("Could not schedule fix for %s", report.get("id"))
 
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
@@ -740,9 +754,11 @@ class ReportState:
         self.run_record["scan_results"] = self.scan_results
 
         logger.info("Updated scan final fields")
-        self.save_run_data(mark_complete=True)
-        posthog.end(self, exit_reason="finished_by_tool")
-        scarf.end(self, exit_reason="finished_by_tool")
+        self.run_record["assessment_completed_at"] = datetime.now(UTC).isoformat()
+        self.save_run_data(mark_complete=self.fix_finding_callback is None)
+        if self.fix_finding_callback is None:
+            posthog.end(self, exit_reason="finished_by_tool")
+            scarf.end(self, exit_reason="finished_by_tool")
 
     def record_mcp_connections(self, names: list[str]) -> None:
         """Note the MCP servers this run connected, and persist it.

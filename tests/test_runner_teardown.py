@@ -91,3 +91,57 @@ async def test_a_live_child_is_settled_before_sessions_close(
     task = child_task["t"]
     assert task.done(), "the child task was left running past scan teardown"
     assert task.cancelled(), "the child was not cancelled cleanly on a finish"
+
+
+@pytest.mark.asyncio
+async def test_assessment_publishes_before_fixes_end_and_sandbox_teardown(monkeypatch, tmp_path):
+    _wire_runner(monkeypatch, tmp_path)
+    events = []
+
+    class State:
+        fix_finding_callback = None
+
+        def __init__(self):
+            self.scan_results = {"scan_completed": True}
+
+        def get_existing_vulnerabilities(self):
+            return []
+
+        def save_run_data(self, **_):
+            events.append("save")
+
+    class Fixes:
+        def __init__(self, **_):
+            pass
+
+        def notify(self, _):
+            pass
+
+        async def wait(self):
+            events.append("fixes finished")
+
+        async def close(self):
+            events.append("fixes closed")
+
+    async def assessment(_):
+        events.append("assessment published")
+
+    async def root(**_):
+        return types.SimpleNamespace(final_output={"scan_completed": True})
+
+    async def cleanup(*_):
+        events.append("sandbox deleted")
+
+    monkeypatch.setattr(runner, "get_global_report_state", State)
+    monkeypatch.setattr(runner, "ScanFixes", Fixes)
+    monkeypatch.setattr(runner, "run_agent_loop", root)
+    monkeypatch.setattr(session_manager, "cleanup", cleanup)
+    await runner.run_strix_scan(
+        scan_config={"targets": [], "scan_mode": "deep"},
+        scan_id="scan",
+        image="image",
+        local_sources=[{"source_path": str(tmp_path)}],
+        assessment_sink=assessment,
+    )
+    assert events.index("assessment published") < events.index("fixes finished")
+    assert events.index("fixes finished") < events.index("sandbox deleted")

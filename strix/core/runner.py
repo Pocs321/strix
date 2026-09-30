@@ -8,7 +8,7 @@ import io
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +43,7 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.fix.scan import FixSink, ScanFixes
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
 from strix.telemetry import set_scan_phase
@@ -198,6 +199,8 @@ async def run_strix_scan(
     status_sink: StatusSink | None = None,
     mcp_connection_requests: list[McpConnectionRequest] | None = None,
     mcp_status_sink: McpStatusSink | None = None,
+    fix_sink: FixSink | None = None,
+    assessment_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> RunResultBase | None:
     """Run or resume one Strix scan against a sandbox.
 
@@ -356,6 +359,7 @@ async def run_strix_scan(
 
     sessions_to_close: list[SQLiteSession] = []
     mcp_registry: McpRegistry | None = None
+    fixes: ScanFixes | None = None
 
     try:
         targets = scan_config.get("targets") or []
@@ -490,6 +494,23 @@ async def run_strix_scan(
                 skills=skills,
             )
 
+        report_state = get_global_report_state()
+        if report_state is not None and local_sources and not interactive:
+            fixes = ScanFixes(
+                session=sandbox_session,
+                coordinator=coordinator,
+                parent_id=root_id,
+                scan_id=scan_id,
+                state_dir=state_dir,
+                local_sources=local_sources,
+                hooks=hooks,
+                event_sink=event_sink,
+                sink=fix_sink,
+            )
+            report_state.fix_finding_callback = fixes.notify
+            for finding in report_state.get_existing_vulnerabilities():
+                fixes.notify(finding)
+
         child_agent_builder = make_child_factory(
             scan_mode=scan_mode,
             is_whitebox=is_whitebox,
@@ -593,7 +614,10 @@ async def run_strix_scan(
             if isinstance(final, str):
                 try:
                     parsed = json.loads(final)
-                    scan_completed = bool(isinstance(parsed, dict) and parsed.get("scan_completed"))
+                    scan_completed = bool(
+                        isinstance(parsed, dict)
+                        and (parsed.get("scan_completed") or parsed.get("review_completed"))
+                    )
                 except (ValueError, TypeError):
                     scan_completed = False
             elif isinstance(final, dict):
@@ -607,6 +631,16 @@ async def run_strix_scan(
                     scan_id,
                     str(final)[:300],
                 )
+        if report_state is not None and report_state.scan_results:
+            if assessment_sink is not None:
+                try:
+                    await assessment_sink(report_state.scan_results)
+                except Exception:
+                    logger.exception("Could not publish assessment before fix completion")
+            if fixes is not None:
+                report("Assessment complete · Fixes in progress")
+                await fixes.wait()
+            report_state.save_run_data(mark_complete=True)
         return result  # noqa: TRY300
     except BudgetExceededError as exc:
         logger.info("Scan %s stopped: %s", scan_id, exc)
@@ -641,6 +675,11 @@ async def run_strix_scan(
                 await coordinator.set_status(root_id, "failed")
         raise
     finally:
+        if fixes is not None:
+            await fixes.close()
+        report_state = get_global_report_state()
+        if report_state is not None:
+            report_state.fix_finding_callback = None
         configure_spill_writer(None)
         # Settle descendants before closing sessions: on a clean finish a child
         # can still be mid-turn, and closing its session underneath it crashes it.

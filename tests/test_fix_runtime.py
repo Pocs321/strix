@@ -108,7 +108,7 @@ def test_run_fix_preparation_requires_sandbox() -> None:
 
 def test_role_budgets_default_and_legacy_override() -> None:
     request = _request("a" * 40)
-    assert (request.repair_turn_limit, request.review_turn_limit) == (400, 250)
+    assert (request.repair_turn_limit, request.review_turn_limit) == (300, 250)
     request.max_agent_turns = 100
     assert (request.repair_turn_limit, request.review_turn_limit) == (100, 100)
     request.max_repair_turns = 180

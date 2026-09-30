@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import json
 import os
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agents import ModelResponse, RunConfig
+from agents import RunConfig
 from agents.sandbox import SandboxRunConfig
 
 from strix.fix import (
@@ -52,7 +51,7 @@ def test_cli_role_budget_overrides(tmp_path: Path) -> None:
         ]
     )
     loaded = fix_cli._load_request(args)
-    assert (loaded.repair_turn_limit, loaded.review_turn_limit) == (400, 250)
+    assert (loaded.repair_turn_limit, loaded.review_turn_limit) == (300, 250)
 
 
 def _local_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: ScriptedModel) -> None:
@@ -97,7 +96,9 @@ def test_cli_runs_shared_workflow_and_preserves_original_checkout(
         if blocked
         else [*suite_commands(), finish("approved", "Existing and regression tests passed.")]
     )
-    model = ScriptedModel([*patch(), finish("done")], review)
+    model = ScriptedModel(
+        [*patch(), *(review if blocked else [*suite_commands(), finish("done", "tests passed")])]
+    )
     _local_runtime(monkeypatch, tmp_path, model)
     output = tmp_path / "result.json"
 
@@ -117,14 +118,15 @@ def test_cli_runs_shared_workflow_and_preserves_original_checkout(
     assert code == (2 if blocked else 0)
     result = json.loads(output.read_text())
     assert result["state"] == ("blocked" if blocked else "ready")
-    assert result["changed_files"]
-    assert "safe" in output.with_suffix(".patch").read_text()
+    assert bool(result["changed_files"]) is not blocked
+    assert output.with_suffix(".patch").exists() is not blocked
     assert ("customer database" if blocked else "tests passed") in output.with_suffix(
         ".md"
     ).read_text()
-    with zipfile.ZipFile(output.with_suffix(".zip")) as artifact:
-        assert "files/tests/test_security.py" in artifact.namelist()
-        assert "tool-results.jsonl" in artifact.namelist()
+    if not blocked:
+        with zipfile.ZipFile(output.with_suffix(".zip")) as artifact:
+            assert "files/tests/test_security.py" in artifact.namelist()
+            assert "tool-results.jsonl" in artifact.namelist()
     assert _git(workspace, "status", "--porcelain") == ""
     assert _git(workspace, "rev-parse", "HEAD") == commit
     assert "unsafe" in (workspace / "app.py").read_text()
@@ -157,7 +159,7 @@ def test_stale_request_delivers_explanation_without_running_agents(
     )
     assert json.loads(output.read_text())["state"] == "stale"
     assert not model.inputs["repair"]
-    assert output.with_suffix(".patch").read_text() == ""
+    assert not output.with_suffix(".patch").exists()
 
 
 def test_dirty_checkout_is_preserved_and_never_sent_to_agents(
@@ -185,42 +187,6 @@ def test_dirty_checkout_is_preserved_and_never_sent_to_agents(
     )
     assert (workspace / "app.py").read_text() == "user work in progress"
     assert not model.inputs["repair"]
-
-
-@pytest.mark.asyncio
-async def test_interruption_exports_partial_work_before_removing_temporary_clone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace, _ = _workspace(tmp_path)
-    commit = existing_suite(workspace)
-    waiting = asyncio.Event()
-
-    class PausedModel(ScriptedModel):
-        async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
-            if not self.responses["repair"]:
-                waiting.set()
-                await asyncio.Event().wait()
-            return await super().get_response(*args, **kwargs)
-
-    model = PausedModel(patch(), [])
-    _local_runtime(monkeypatch, tmp_path, model)
-    output = tmp_path / "partial.zip"
-    task = asyncio.create_task(
-        fix_runtime.run_isolated_fix_preparation(
-            _request(commit),
-            workspace,
-            artifact_path=output,
-        )
-    )
-    try:
-        await asyncio.wait_for(waiting.wait(), timeout=10)
-    finally:
-        task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    with zipfile.ZipFile(output) as artifact:
-        assert b"return 'safe'" in artifact.read("files/app.py")
-    assert _git(workspace, "status", "--porcelain") == ""
 
 
 def test_finding_selection_is_required_before_preflight(
@@ -264,7 +230,7 @@ def test_cli_outputs_and_in_progress_archive_are_private_in_shared_directory(
     shared.mkdir()
     shared.chmod(0o777)
     output = shared / "result.json"
-    model = ScriptedModel([*patch(), finish("done")], [*suite_commands(), finish("approved")])
+    model = ScriptedModel([*patch(), *suite_commands(), finish("done")])
     _local_runtime(monkeypatch, tmp_path, model)
     original_writestr = zipfile.ZipFile.writestr
     writes_checked: list[str] = []
@@ -318,7 +284,7 @@ def test_default_outputs_allow_repeated_runs_from_inside_the_repository(
     monkeypatch.chdir(workspace)
 
     for attempt in range(2):
-        model = ScriptedModel([*patch(), finish("done")], [*suite_commands(), finish("approved")])
+        model = ScriptedModel([*patch(), *suite_commands(), finish("done")])
         with monkeypatch.context() as runtime_patch:
             _local_runtime(runtime_patch, tmp_path / f"attempt-{attempt}", model)
             assert fix_cli.run_fix(["--request", str(request_path), "--repo", "."]) == 0

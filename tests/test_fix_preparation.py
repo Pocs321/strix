@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from strix.fix.contracts import (
-    BlockerKind,
     CandidateLocation,
     CheckResult,
     CheckStatus,
@@ -27,8 +26,6 @@ from strix.fix.contracts import (
     ReproductionSpec,
     SourceIdentity,
     SourceIdentityKind,
-    VerificationDecision,
-    VerifierResult,
     candidate_from_legacy_report,
 )
 from strix.fix.locations import AnchorStatus, anchor_location
@@ -141,13 +138,12 @@ async def test_explicit_candidate_blocker_does_not_start_agents(tmp_path: Path) 
             "blocker": {"reason": "Affected source is unavailable."},
         }
     )
-    repair, review = AsyncMock(), AsyncMock()
-    result = await prepare_fix(_request(candidate), workspace, repair=repair, verify=review)
+    repair = AsyncMock()
+    result = await prepare_fix(_request(candidate), workspace, repair=repair)
     assert result.state is PreparationState.BLOCKED
     assert result.stop_reason == candidate.blocker.reason
     assert result.attempts == 0
     repair.assert_not_awaited()
-    review.assert_not_awaited()
 
 
 async def _noop_repair(
@@ -206,18 +202,6 @@ async def _fixture_command(workspace: Path, command: CommandSpec) -> CheckResult
         exit_code=process.returncode,
         duration_seconds=0,
         output=output.decode(),
-    )
-
-
-async def _verified(
-    context: PreparationContext,
-    _checks: list[CheckResult],
-) -> VerifierResult:
-    return VerifierResult(
-        decision=VerificationDecision.VERIFIED,
-        source_digest=context.feedback[-1].repair.source_digest,
-        summary="The fix addresses the finding.",
-        review_basis="code_review",
     )
 
 
@@ -310,12 +294,10 @@ async def test_prepare_fix_rejects_wrong_source_commit(tmp_path: Path) -> None:
         _request(_candidate("0" * 40)),
         workspace,
         repair=_noop_repair,
-        verify=_verified,
     )
 
     assert result.state is PreparationState.STALE
-    assert result.blocker is not None
-    assert result.blocker.kind is BlockerKind.SOURCE
+    assert result.stop_reason == "The finding source no longer matches."
 
 
 @pytest.mark.asyncio
@@ -327,7 +309,6 @@ async def test_prepare_fix_rejects_dirty_workspace(tmp_path: Path) -> None:
         _request(_candidate(commit)),
         workspace,
         repair=_noop_repair,
-        verify=_verified,
     )
 
     assert result.state is PreparationState.STALE
@@ -383,190 +364,54 @@ def test_candidate_keeps_full_finding_without_inventing_reproduction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_tests_are_reused_without_controller_execution(tmp_path: Path) -> None:
+async def test_agent_tests_are_reused_without_controller_execution(tmp_path):
     workspace, commit = _workspace(tmp_path)
-    outcome = None
-
-    async def repair(context, checks):
-        nonlocal outcome
-        outcome = await _noop_repair(context, checks)
-        return outcome
-
-    result = await prepare_fix(
-        _request(_candidate(commit)), workspace, repair=repair, verify=_verified
-    )
+    result = await prepare_fix(_request(_candidate(commit)), workspace, repair=_noop_repair)
     assert result.state is PreparationState.READY
-    assert result.validation_mode == "agent_review"
-    assert result.checks == outcome.command_results
+    assert result.validation_mode == "single_agent"
+    assert result.completion.status == RepairStatus.COMPLETE
+    assert result.verifier is None
+    assert result.checks == result.completion.command_results
     assert "Ran 1 test" in result.checks[0].output
-    assert result.prepared_source_digest == result.verifier.source_digest
 
 
 @pytest.mark.asyncio
-async def test_review_can_request_more_than_two_repairs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stop", ["blocked", "exception", "cancel"])
+async def test_failed_fix_never_exports_partial_work(tmp_path, stop):
     workspace, commit = _workspace(tmp_path)
 
-    async def review(context, checks):
-        if context.attempt < 4:
-            return VerifierResult(
-                decision=VerificationDecision.REJECTED,
-                summary="Inspect sibling path",
-                gaps=["Inspect sibling path"],
-            )
-        assert context.feedback[-2].verifier.summary == "Inspect sibling path"
-        return await _verified(context, checks)
+    async def agent(context, checks):
+        outcome = await _noop_repair(context, checks)
+        if stop == "exception":
+            raise RuntimeError("test interruption")
+        return outcome.model_copy(update={"status": RepairStatus.BLOCKED})
 
-    result = await prepare_fix(
-        _request(_candidate(commit)), workspace, repair=_noop_repair, verify=review
-    )
-    assert result.state is PreparationState.READY
-    assert len(result.attempt_history) == 4  # Legacy max_repair_attempts=2 is not a loop cap.
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("defect", ["missing_unit", "failed", "missing_request"])
-async def test_agent_approval_owns_test_evidence_without_controller_retries(
-    tmp_path: Path, defect: str
-) -> None:
-    workspace, commit = _workspace(tmp_path)
-
-    async def repair(context, checks):
-        result = await _noop_repair(context, checks)
-        if defect == "missing_unit":
-            result.command_results = [
-                c for c in result.command_results if c.name != "existing suite"
-            ]
-        elif defect == "missing_request":
-            result.command_results = [c for c in result.command_results if c.name != "compile"]
-        else:
-            check = result.command_results[0]
-            check.status, check.exit_code = CheckStatus.FAILED, 1
-        return result
-
-    request = _request(_candidate(commit))
-    request.max_agent_turns = 2
-    result = await prepare_fix(request, workspace, repair=repair, verify=_verified)
-    # Deliberately scripted approval: test policy is the reviewer's responsibility.
-    # This tests routing, not whether a real reviewer ought to approve this evidence.
-    assert result.state is PreparationState.READY
-    assert result.final_file_manifest
-    assert result.attempts == 1
-    assert not result.attempt_history[0].repair.gaps
-
-
-@pytest.mark.asyncio
-async def test_incomplete_validation_can_be_finished_by_reviewer(tmp_path: Path) -> None:
-    workspace, commit = _workspace(tmp_path)
-    evidence = []
-
-    async def repair(context, checks):
-        result = await _noop_repair(context, checks)
-        evidence.extend(result.command_results)
-        evidence[1].status = CheckStatus.FAILED
-        return result
-
-    async def review(context, checks):
-        assert checks[1].status is CheckStatus.FAILED
-        command = CommandSpec(name="existing suite", argv=checks[1].argv, purpose="unit")
-        evidence[1] = await _fixture_command(workspace, command)
-        return await _verified(context, checks)
-
-    async def read_evidence():
-        return list(evidence)
-
+    export = AsyncMock()
     result = await prepare_fix(
         _request(_candidate(commit)),
         workspace,
-        repair=repair,
-        verify=review,
-        evidence_reader=read_evidence,
+        repair=agent,
+        manifest_builder=export,
+        cancelled=lambda: stop == "cancel",
     )
-    assert result.state is PreparationState.READY
-    assert result.checks[1].status is CheckStatus.PASSED
+    assert result.state is not PreparationState.READY
+    assert not result.final_file_manifest
+    assert result.artifact_ref is None
+    export.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["budget", "blocked", "exception", "timeout", "cancel"])
-async def test_interruptions_preserve_partial_patch_without_approval(
-    tmp_path: Path, stop: str
-) -> None:
-
-    workspace, commit = _workspace(tmp_path)
-    cancel = False
-
-    async def repair(context, checks):
-        nonlocal cancel
-        result = await _noop_repair(context, checks)
-        if stop == "budget":
-            result.status = RepairStatus.BUDGET_EXHAUSTED
-        elif stop == "blocked":
-            result.status = RepairStatus.BLOCKED
-        elif stop == "exception":
-            raise RuntimeError("provider error")
-        elif stop == "timeout":
-            await asyncio.sleep(10)
-        else:
-            cancel = True
-        return result
-
-    async def review(*_args):
-        raise AssertionError("Stopped repair must not be approved")
-
-    result = await prepare_fix(
-        _request(_candidate(commit)).model_copy(
-            update={"timeout_seconds": 1 if stop == "timeout" else 30}
-        ),
-        workspace,
-        repair=repair,
-        verify=review,
-        cancelled=lambda: cancel,
-    )
-    assert result.state in {PreparationState.BLOCKED, PreparationState.FAILED}
-    assert result.final_file_manifest
-
-
-@pytest.mark.asyncio
-async def test_review_mutation_blocks_delivery_without_controller_repair_loop(
-    tmp_path: Path,
-) -> None:
+async def test_completed_agent_cannot_deliver_changed_checkpoint(tmp_path):
     workspace, commit = _workspace(tmp_path)
 
-    async def review(context, checks):
-        result = await _verified(context, checks)
-        if context.attempt == 1:
-            (workspace / "review.tmp").write_text("temporary")
-        return result
+    async def agent(context, checks):
+        outcome = await _noop_repair(context, checks)
+        (workspace / "app.py").write_text("changed after completion")
+        return outcome
 
-    async def repair(context, checks):
-        assert context.attempt == 1
-        return await _noop_repair(context, checks)
-
-    result = await prepare_fix(
-        _request(_candidate(commit)), workspace, repair=repair, verify=review
-    )
+    result = await prepare_fix(_request(_candidate(commit)), workspace, repair=agent)
     assert result.state is PreparationState.BLOCKED
-    assert "deliverable changed" in result.stop_reason
-    assert result.attempts == 1
-    assert result.final_file_manifest
-
-
-@pytest.mark.asyncio
-async def test_empty_deliverable_does_not_start_another_repair(tmp_path: Path) -> None:
-    workspace, commit = _workspace(tmp_path)
-
-    async def repair(context, _checks):
-        assert context.attempt == 1
-        return RepairOutcome(status=RepairStatus.COMPLETE, summary="Done.")
-
-    async def review(*_args):
-        raise AssertionError("An empty artifact cannot be delivered")
-
-    result = await prepare_fix(
-        _request(_candidate(commit)), workspace, repair=repair, verify=review
-    )
-    assert result.state is PreparationState.BLOCKED
-    assert result.attempts == 1
-    assert "without a deliverable patch" in result.stop_reason
+    assert not result.final_file_manifest
 
 
 def test_new_command_metadata_does_not_change_existing_finding_digest(tmp_path: Path) -> None:

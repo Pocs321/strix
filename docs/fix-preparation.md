@@ -1,175 +1,31 @@
-# Fix preparation
+# Fixing findings during a scan
 
-The workflow is **repair → review → reviewed patch**. Both agents use Strix's existing
-agent loop, native filesystem and shell tools, and saved conversations. They share
-one persistent sandbox. The assignments live in `strix/agents/prompts/fix_repair.jinja` and
-`fix_review.jinja`, with shared workspace instructions in `fix_workspace.jinja`.
+- The assessment investigates and validates an issue, then saves its vulnerability report.
+- A confirmed report with an actionable source-backed candidate starts a Fix agent immediately. Unconfirmed reports, duplicate reports, and explicit candidate blockers do not start one.
+- Each finding gets a Git worktree in the scan's existing sandbox. Fixes run concurrently; the original checkout remains available for assessment and attack chaining.
+- One native Strix agent implements the complete fix, adds a regression test, runs it and relevant existing customer unit tests, runs applicable build/lint/type checks, and reviews the change. Test selection and recovery belong to the agent.
+- The agent calls `agent_finish(outcome="done")` or `agent_finish(outcome="blocked")`. The controller enforces **300 total model turns per finding**, including resumed execution and candidate revisions. It does not start a fresh agent after exhaustion.
+- The controller binds completion to the final source checkpoint. Only a completed, nonempty patch becomes an artifact. Blocked, interrupted, or capped work produces no deliverable patch.
+- Assessment completion publishes the security report. Fixes may continue in the same sandbox; execution and sandbox cleanup finish after all Fix tasks stop. Scan cancellation and the shared model budget also stop fix work.
+- In the hosted app, successful fixes become available for **user-initiated draft PR creation** on the issue. Incomplete patches are not shown. Internal diagnostic logs and terminal status remain available to operators.
 
-Repair receives the finding, evidence, affected locations, suggested remediation,
-and available reproduction details. It makes a minimal fix, adds a regression test
-using the repository's framework, and hands test locations, commands, results, and
-failed approaches to review. Once it understands the affected path, it starts the
-change rather than expanding the investigation. It preserves legitimate behavior,
-not the behavior that enables the vulnerability. Once its focused regression passes,
-repair hands off rather than expanding into the full customer suite.
-Review receives the finding, patch, repair summary, and command history. It runs
-the customer's relevant existing unit tests and the regression test, then judges
-whether the change addresses the issue without obvious regressions. It challenges
-the repair's central assumption with the strongest plausible bypass and checks
-legitimate behavior. Required tests must pass, exercise the actual security decision,
-and include any helpers needed to reproduce them in the delivered patch. The reviewer
-can make small corrections and rerun affected tests. Optional hardening is follow-up
-work; a remaining path to the reported attack is not optional. Existing customer unit
-tests remain mandatory: start with the changed component and its direct consumers.
-Run the full suite only when small or justified by broad effects, explaining the
-reason before starting. Finish once the relevant tests pass, the attack is blocked,
-and legitimate use works; additional reassurance alone is not a reason to expand.
+## Implementation
 
-Both agents use documented setup and targeted recovery, avoid repeating failed
-experiments without a new hypothesis, and hand off or report a blocker when they
-cannot progress. Unrelated failures are investigated enough to establish a baseline
-and then documented, without taking on repair of the entire test environment. Required
-validation that remains blocked is reported as a blocker. Test commands must retain
-their actual exit status. These are
-agent instructions, not a separate controller that selects or interprets tests.
+- `strix/tools/reporting/tool.py`: persists the finding and its confirmed/unconfirmed validation status.
+- `strix/report/state.py`: notifies the scan only after successful finding persistence.
+- `strix/fix/scan.py`: deduplicates tasks, creates independent worktrees, preserves turn counts, and joins/cancels tasks during scan teardown.
+- `strix/fix/session.py`: borrows the scan sandbox with a worktree-specific filesystem root and process ownership. Cleanup never stops another agent's processes.
+- `strix/agents/prompts/fix.jinja`: the single Fix assignment; shared workspace guidance is in `fix_workspace.jinja`.
+- `strix/fix/runtime.py`: uses `build_strix_agent`, `run_agent_loop`, native tools, persisted sessions, and usage hooks. There is no separate reviewer or custom conversation loop.
+- `strix/fix/prepare.py`: checks source identity and the completed patch, then exports successful artifacts.
+- Pro supplies progress/result callbacks. The app registers the inline attempt, stores successful artifacts privately, and creates draft PRs using its existing repository integration. Neither starts another fix sandbox.
 
-The existing fix hooks also warn when the same completed command, directory, shell,
-exit status, and process output recur three times within twelve recent completed
-commands. Timing and chunk IDs are excluded from the comparison. Changed results
-reset that command's history; native patch calls reset the window. Running commands
-and `write_stdin` polling are excluded. The warning asks the agent to change approach
-or hand off; it never blocks a tool, waives tests, or decides the review outcome.
+The `single_agent` result contract records the Fix agent's completion, command history, final file manifest, and source digest. It does not claim independent verification. Commands include diagnostic failures and superseded attempts; the agent's final summary explains which tests passed and any optional follow-ups.
 
-## Completion and handoffs
+## Standalone OSS command
 
-Before preparation, a source-backed scan report must supply paired `fix_before` /
-`fix_after` edits in `code_locations` plus `fix_verification`, or an explicit
-`fix_candidate_blocker` with a reason. Prose in `fix_pr_body` alone is not a code
-handoff. This also applies to external tests with an attached repository. Black-box
-findings without repository source can still be reported without code locations.
-The verification note describes draft reasoning and testing gaps; the scanner does
-not need to implement or test the fix before reporting the vulnerability.
+`strix fix --finding findings.json --finding-id FINDING_ID --repo /path/to/repo`
 
-The blocker is stored as `fix_candidate.blocker`. It preserves the finding and
-explains why preparation cannot start. Updating with a blocker withdraws old edits;
-new paired locations and verification replace it. Hosted callers persist the whole
-candidate and its digest together, and candidate changes invalidate old preparations
-and revoke outstanding callbacks.
+The standalone command uses the same single-agent implementation in its own sandbox, because no live scan exists to borrow. It preserves the supplied checkout and writes private outputs outside the repository by default. Only successful runs export a patch and archive. `--max-agent-turns` and the legacy `--max-repair-turns` can lower the turn cap; they cannot raise it above 300. Old request fields are accepted for compatibility, but reviewer limits no longer control a second agent.
 
-Agents finish through Strix's `agent_finish` tool:
-
-- Repair: `done` starts review; `blocked` stops and preserves work.
-- Review: `approved` finishes; `changes_requested` resumes repair with feedback;
-  `blocked` stops and explains the missing prerequisite or failed required tests.
-
-Each agent retains its own conversation across handoffs. Test selection and
-interpretation belong to the reviewer. Code checks source identity, requires a
-nonempty patch, and ensures delivery matches the final workspace approved by review.
-Reviewer corrections are included in that workspace. Changes after approval block
-delivery; they do not automatically start another repair.
-
-Malformed completion calls return the native tool error to the same agent so it can
-correct the call. The logging hook accepts non-JSON error text without crashing or
-mistaking it for successful completion. There is no additional retry loop.
-
-## Files and evidence
-
-- `strix/fix/prepare.py`: routes repair and review decisions.
-- `strix/fix/runtime.py`: supplies assignments to native Strix agents, routes outcomes,
-  and records tool results and usage.
-- `strix/fix/workspace.py`: stages source and sanitized Git metadata in the sandbox,
-  then exports changes to the host's artifact mirror.
-
-The public `strix.fix.runtime.run_isolated_fix_preparation()` entry point takes a
-request and a clean Git checkout. It creates a job-owned clone and artifact mirror;
-the supplied checkout is never edited. It uses the configured native sandbox
-backend (Docker in OSS; registered cloud backends work for hosted callers).
-
-The agents execute customer code only inside the sandbox. The host mirror is used
-for artifact construction. Changes are saved when an agent completes or is
-interrupted. Interrupted runs retain useful work without claiming approval.
-
-Native shell and filesystem tools resolve relative paths from the same staged
-repository root. Temporary checkpoint archives live under the sandbox's Git metadata
-and are excluded from exported source.
-
-The artifact contains the patch, changed files, `execution.json`,
-`agent-sessions.json`, and `tool-results.jsonl`. Logs stay outside repository source.
-Command records retain the output returned by native tools, including their output
-limits. Agents can redirect lengthy test output to a sandbox file and inspect it
-with the native tools. Command exit codes are evidence for review, not proof of
-security or coverage by themselves.
-
-## Budgets and delivery
-
-Repair defaults to 400 turns and review to 250, counted across continuations rather
-than reset on each handoff. Optional `max_repair_turns` and `max_review_turns` override
-the respective limit. The legacy `max_agent_turns` overrides both defaults; an explicit
-role limit takes precedence. Existing native turn warnings tell fix agents to finish
-their current work and hand off or decide, preserving partial work. Normal scan limits
-and warnings are unchanged. The configurable job deadline still defaults to 7,200 seconds. An optional
-`max_budget_usd` applies across both agents using SDK usage estimates. The legacy
-request field `max_repair_attempts` is accepted but does not control this loop.
-
-New results use `validation_mode: agent_review`. They contain the review decision,
-summary, final patch identity, and command history. The app delivers approved
-results as draft PRs and includes the review and testing limitations. Completion
-`open_items` become reported gaps and `final_recommendations` become follow-up notes,
-including on approved results. The CLI and draft PR show both; PRs put them before
-the command history. Historical
-`native_tests` and `paired` records remain readable by the app's compatibility code;
-new runs do not produce those proof structures.
-
-## Run from the OSS CLI
-
-Use the same configured model and Docker environment as a normal Strix scan:
-
-```bash
-strix fix --repo ./repo --finding strix_runs/my-scan/vulnerabilities.json \
-  --finding-id vuln-0001 --output ./fix-result/result.json
-```
-
-A file containing one finding or a `FixCandidateV1` also works. Findings need their
-recorded `fix_candidate.source_identity`; the command does not guess which revision
-an old finding described. The checkout must be clean and at that recorded commit.
-This first CLI version supports Git sources, not restoration of uploaded archives.
-
-Automation and benchmarks can pass the existing request format:
-
-```bash
-strix fix --repo ./repo --request request.json --output ./fix-result/result.json
-```
-
-`--workspace` is an alias for `--repo`. `--artifact` overrides the archive path;
-`--max-repair-turns`, `--max-review-turns`, the legacy `--max-agent-turns`, `--timeout`,
-and `--max-budget` override request budgets.
-Outputs are result JSON, a readable Markdown review, a patch, and the full ZIP
-artifact. Without `--output`, they go in a new `~/.strix/fixes/fix-…` directory
-outside the source checkout. If that location is itself inside the repository,
-choose an external directory with `--output`. Explicit output directories can be
-shared: result files and the ZIP are private from creation (0600 on POSIX) and
-published atomically. Existing directory permissions are left unchanged.
-Exit codes: 0 approved, 2 incomplete/blocked/stale, 1 startup or input failure,
-130 interrupted. Interruptions save any checkpointed work in the ZIP archive.
-Partial patches and their limitations are retained when review cannot approve.
-The CLI does not push changes or publish PRs.
-
-## Hosted integration and credentials
-
-The hosted runner in `strix-pro` restores authorized source, calls this exact OSS
-entry point, and sends the result to the app. The app owns account permissions and
-publishing through the connected Git provider. Neither supplies a separate repair
-or review implementation.
-
-Fix requests cannot select environment variables from the runner. The removed
-credential forwarding option accepts legacy empty lists only; nonempty lists fail
-validation. No host credential names or prefix blocklists are needed. Customer test
-credentials are not injected by this feature; tests needing them must report the
-missing setup accurately.
-
-## Local checks
-
-`make test-fix-reliability` exercises the actual Strix loop and native SDK tools
-with scripted model responses and local fixture tests. It covers handoffs, reviewer
-corrections, blocked or interrupted work, and artifact integrity. It does not make
-live model calls or evaluate patch quality; the benchmark covers those questions.
+Uploaded archives and ambiguous multiple-repository findings cannot currently start an automatic worktree fix: the candidate must identify one Git source and its exact revision.

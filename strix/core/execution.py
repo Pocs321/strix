@@ -425,6 +425,8 @@ async def respawn_subagents(
         ]
         candidates: list[tuple[str, str, str | None, dict[str, Any]]] = []
         for aid, status, md in agents_snapshot:
+            if "fix_task" in md.get("skills", []):
+                continue  # Fix tasks restore their own workspace, prompt and turn allowance.
             if not interactive and status not in {"running", "waiting"}:
                 continue
             if coordinator.parent_of.get(aid) is None or aid == root_id:
