@@ -68,6 +68,7 @@ from strix.fix.workspace import (
 from strix.report.usage import LLMUsageLedger
 from strix.runtime import session_manager
 from strix.tools.thinking.tool import think
+from strix.utils.secret_files import open_secret_file
 
 
 if TYPE_CHECKING:
@@ -603,13 +604,11 @@ async def run_fix_preparation(
         if artifact_path is None:
             return manifest, summary, None
         destination = artifact_path.resolve()
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         patch_output = await build_git_patch(root, manifest)
-        with zipfile.ZipFile(
-            destination,
-            mode="w",
-            compression=zipfile.ZIP_DEFLATED,
-        ) as archive:
+        with (
+            open_secret_file(destination) as stream,
+            zipfile.ZipFile(stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive,
+        ):
             archive.writestr(
                 "manifest.json",
                 json.dumps(
@@ -641,7 +640,6 @@ async def run_fix_preparation(
                     continue
                 source = environment.resolve(entry.path)
                 archive.write(source, f"files/{entry.path}")
-        destination.chmod(0o600)
         return manifest, summary, str(destination)
 
     environment.max_agent_turns = request.max_agent_turns

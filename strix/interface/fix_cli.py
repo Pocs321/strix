@@ -15,7 +15,6 @@ from rich.console import Console
 
 from strix.config import load_settings
 from strix.config.models import configure_sdk_model_defaults
-from strix.core.paths import run_dir_for
 from strix.fix import (
     FixCandidateV1,
     FixPreparationRequestV1,
@@ -25,6 +24,7 @@ from strix.fix import (
 from strix.fix.runtime import run_isolated_fix_preparation
 from strix.interface.environment import check_docker_installed, pull_docker_image
 from strix.interface.scan_setup import preflight_model_connection
+from strix.utils.secret_files import open_secret_file, write_secret_text
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,7 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--finding-id", help="Finding ID to select from vulnerabilities.json.")
     parser.add_argument("--repo", "--workspace", dest="repo", type=Path, required=True)
     parser.add_argument(
-        "--output", type=Path, help="Result JSON; defaults to a new strix_runs folder."
+        "--output", type=Path, help="Result JSON; defaults to a new ~/.strix/fixes/ folder."
     )
     parser.add_argument(
         "--artifact", type=Path, help="Patch/log archive; defaults beside the result."
@@ -130,12 +130,25 @@ async def _execute(
 ) -> FixPreparationResultV1:
     await _preflight()
     result = await run_isolated_fix_preparation(request, repo, artifact_path=artifact)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8")
-    output.with_suffix(".md").write_text(_summary(result), encoding="utf-8")
-    with zipfile.ZipFile(artifact) as archive:
-        output.with_suffix(".patch").write_bytes(archive.read("changes.patch"))
+    write_secret_text(output, result.model_dump_json(indent=2) + "\n")
+    write_secret_text(output.with_suffix(".md"), _summary(result))
+    with (
+        zipfile.ZipFile(artifact) as archive,
+        open_secret_file(output.with_suffix(".patch")) as stream,
+    ):
+        stream.write(archive.read("changes.patch"))
     return result
+
+
+def _default_output(repo: Path) -> Path:
+    output = (
+        Path.home() / ".strix" / "fixes" / f"fix-{uuid.uuid4().hex[:12]}" / "result.json"
+    ).resolve()
+    if output.is_relative_to(repo.resolve()):
+        raise ValueError(
+            "The default results directory is inside this repository; set --output outside it."
+        )
+    return output
 
 
 def run_fix(argv: list[str]) -> int:
@@ -144,9 +157,7 @@ def run_fix(argv: list[str]) -> int:
     console = Console()
     try:
         request = _load_request(args)
-        output = (
-            args.output or run_dir_for(f"fix-{uuid.uuid4().hex[:12]}") / "result.json"
-        ).resolve()
+        output = (args.output or _default_output(args.repo)).resolve()
         artifact = (args.artifact or output.with_suffix(".zip")).resolve()
         # Result files must not overwrite source or a previous preparation's evidence.
         paths = [output, artifact, output.with_suffix(".md"), output.with_suffix(".patch")]

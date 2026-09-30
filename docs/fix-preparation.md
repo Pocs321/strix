@@ -87,8 +87,11 @@ strix fix --repo ./repo --request request.json --output ./fix-result/result.json
 `--workspace` is an alias for `--repo`. `--artifact` overrides the archive path;
 `--max-agent-turns`, `--timeout`, and `--max-budget` override request budgets.
 Outputs are result JSON, a readable Markdown review, a patch, and the full ZIP
-artifact. Without `--output`, they go in a new `strix_runs/fix-…` directory. Use an
-output directory outside the source checkout to keep it clean for the next run.
+artifact. Without `--output`, they go in a new `~/.strix/fixes/fix-…` directory
+outside the source checkout. If that location is itself inside the repository,
+choose an external directory with `--output`. Explicit output directories can be
+shared: result files and the ZIP are private from creation (0600 on POSIX) and
+published atomically. Existing directory permissions are left unchanged.
 Exit codes: 0 approved, 2 incomplete/blocked/stale, 1 startup or input failure,
 130 interrupted. Interruptions save any checkpointed work in the ZIP archive.
 Partial patches and their limitations are retained when review cannot approve.

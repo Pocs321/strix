@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
+import stat
 import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 from agents import RunConfig
@@ -206,3 +209,82 @@ def test_legacy_empty_credential_field_is_accepted_but_forwarding_is_rejected():
     FixPreparationRequestV1.model_validate({**request, "credentials_allowed": []})
     with pytest.raises(ValueError, match="credentials_allowed"):
         FixPreparationRequestV1.model_validate({**request, "credentials_allowed": ["ANY_HOST_KEY"]})
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_cli_outputs_and_in_progress_archive_are_private_in_shared_directory(tmp_path, monkeypatch):
+    workspace, _ = _workspace(tmp_path)
+    commit = existing_suite(workspace)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(_request(commit).model_dump_json())
+    shared = tmp_path / "shared-output"
+    shared.mkdir()
+    shared.chmod(0o777)
+    output = shared / "result.json"
+    model = ScriptedModel([*patch(), finish("done")], [*suite_commands(), finish("approved")])
+    _local_runtime(monkeypatch, tmp_path, model)
+    original_writestr = zipfile.ZipFile.writestr
+    writes_checked = []
+
+    def private_writestr(archive, name, data, *args, **kwargs):
+        # Check the open archive before source/log bytes enter it, not just after close.
+        assert stat.S_IMODE(os.fstat(archive.fp.fileno()).st_mode) == 0o600
+        writes_checked.append(name)
+        return original_writestr(archive, name, data, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", private_writestr)
+    previous = os.umask(0)
+    try:
+        assert (
+            fix_cli.run_fix(
+                [
+                    "--request",
+                    str(request_path),
+                    "--repo",
+                    str(workspace),
+                    "--output",
+                    str(output),
+                ]
+            )
+            == 0
+        )
+    finally:
+        os.umask(previous)
+    assert "changes.patch" in writes_checked
+    assert "agent-sessions.json" in writes_checked
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o777
+    assert {p.name for p in shared.iterdir()} == {
+        "result.json",
+        "result.md",
+        "result.patch",
+        "result.zip",
+    }
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in shared.iterdir())
+
+
+def test_default_outputs_allow_repeated_runs_from_inside_the_repository(tmp_path, monkeypatch):
+    workspace, _ = _workspace(tmp_path)
+    commit = existing_suite(workspace)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(_request(commit).model_dump_json())
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.chdir(workspace)
+
+    for attempt in range(2):
+        model = ScriptedModel([*patch(), finish("done")], [*suite_commands(), finish("approved")])
+        with monkeypatch.context() as runtime_patch:
+            _local_runtime(runtime_patch, tmp_path / f"attempt-{attempt}", model)
+            assert fix_cli.run_fix(["--request", str(request_path), "--repo", "."]) == 0
+        assert _git(workspace, "status", "--porcelain") == ""
+
+    assert len(list((home / ".strix/fixes").glob("fix-*/result.json"))) == 2
+    assert not (workspace / "strix_runs").exists()
+
+
+def test_default_output_cannot_resolve_inside_source_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with pytest.raises(ValueError, match="set --output outside"):
+        fix_cli._default_output(tmp_path)
+    assert not (tmp_path / ".strix").exists()
