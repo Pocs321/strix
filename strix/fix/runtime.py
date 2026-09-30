@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import uuid
 import zipfile
+from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -78,6 +79,8 @@ if TYPE_CHECKING:
     from agents.sandbox.session import BaseSandboxSession
 
 _MAX_TOOL_OUTPUT_CHARS = 30_000
+_REPEAT_WINDOW = 12
+_REPEAT_THRESHOLD = 3
 
 
 def _output_text(text: str, *, max_chars: int | None = _MAX_TOOL_OUTPUT_CHARS) -> str:
@@ -94,6 +97,8 @@ class _FixHooks(ReportUsageHooks):
         self.review = review
         self.turns = 0
         self.completion_digest: str | None = None
+        self._recent_commands: deque[tuple[str, int, str]] = deque(maxlen=_REPEAT_WINDOW)
+        self._repetition_warning = False
 
     async def on_llm_start(
         self, context: Any, agent: Any, system_prompt: Any, input_items: Any
@@ -107,6 +112,40 @@ class _FixHooks(ReportUsageHooks):
             raise MaxTurnsExceeded("The agent turn budget was reached.")
         self.turns += 1
         await super().on_llm_start(context, agent, system_prompt, input_items)
+        if self._repetition_warning:
+            input_items.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[Repeated command] The same completed command returned the same exit "
+                        f"status and output {_REPEAT_THRESHOLD} times in your recent commands. "
+                        "Change approach or hand off the work and results. If required validation "
+                        "is blocked, report the blocker. Do not repeat the command without a "
+                        "relevant change or a concrete new hypothesis."
+                    ),
+                }
+            )
+            self._repetition_warning = False
+
+    def _track_repetition(self, command: dict[str, Any], exit_code: int, output: str) -> None:
+        identity = json.dumps(
+            (
+                command.get("cmd"),
+                command.get("workdir") or self.environment.session.state.manifest.root,
+                command.get("shell") or "bash",
+                command.get("login", True),
+            )
+        )
+        entry = (identity, exit_code, hashlib.sha256(output.encode()).hexdigest())
+        # A changed result is new evidence. Forget earlier outcomes for that command.
+        self._recent_commands = deque(
+            (old for old in self._recent_commands if old[0] != identity or old == entry),
+            maxlen=_REPEAT_WINDOW,
+        )
+        self._recent_commands.append(entry)
+        if self._recent_commands.count(entry) >= _REPEAT_THRESHOLD:
+            self._repetition_warning = True
+            self._recent_commands.clear()
 
     def _turns_used(self, _context: RunContextWrapper[dict[str, Any]], /) -> int:
         # SDK usage starts over when review sends repair feedback; our counter does not.
@@ -152,6 +191,10 @@ class _FixHooks(ReportUsageHooks):
         }
         with (env.workspace.parent / "fix-tool-results.jsonl").open("a") as stream:
             stream.write(json.dumps(event) + "\n")
+        if context.tool_name == "apply_patch":
+            self._recent_commands.clear()
+            self._repetition_warning = False
+            return
         if context.tool_name == "agent_finish":
             try:
                 completion = json.loads(raw)
@@ -182,6 +225,9 @@ class _FixHooks(ReportUsageHooks):
         elif context.tool_name == "write_stdin":
             env.pending_commands.pop(arguments["session_id"], None)
         exit_code = int(code[1]) if code else None
+        # Only immediately completed commands: polling/running processes are not repetition.
+        if context.tool_name == "exec_command" and exit_code is not None:
+            self._track_repetition(command, exit_code, output)
         env.record_command(
             CheckResult(
                 name=str(command.get("cmd", context.tool_name))[:200],

@@ -3,6 +3,11 @@ and test setup. Install needed dependencies, but avoid turning unrelated
 infrastructure failures into another development project. Attempt a targeted
 recovery; if still blocked, preserve the work and explain what is needed.
 
+Investigate unrelated test failures only enough to establish whether they occur
+without the fix, then document them. Do not repair the repository's entire test
+environment. If required validation remains blocked, preserve the patch and report
+the blocker rather than claiming approval.
+
 Do not repeat an experiment without a new hypothesis or a relevant change. When
 attempts stop producing useful evidence, simplify the approach, hand off, or report
 a blocker.

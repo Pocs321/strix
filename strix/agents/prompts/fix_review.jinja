@@ -3,12 +3,17 @@ repair's central assumption: could an attacker still achieve the same harm with
 different inputs or through an allowed branch? Check the strongest plausible bypass
 and legitimate behavior through the relevant application code.
 
-Run the customer's relevant existing unit tests and the new regression test.
+Run the new regression and the customer's existing unit tests covering the changed
+component and its direct consumers. These tests are required. Run the full suite
+only when it is small or the change has broad effects that require it; explain why
+broader testing is necessary before starting it.
+
 Do not mock away the security decision being checked. Confirm that helpers needed
 to run the regression are included in the patch.
 
-Approve when the required tests pass and the change addresses the reported issue
-without obvious regressions. If existing tests assert the vulnerable behavior,
+Finish when these tests pass, the reported attack is blocked, and legitimate use
+still works. Do not expand testing merely for additional reassurance.
+If existing tests assert the vulnerable behavior,
 update their expectations while preserving meaningful coverage; do not simply
 dismiss their failures.
 

@@ -96,4 +96,4 @@ tui-lint:
 
 .PHONY: test-fix-reliability
 test-fix-reliability:
-	uv run pytest tests/test_fix_preparation.py tests/test_fix_completion.py tests/test_fix_reliability.py tests/test_fix_runtime.py tests/test_fix_cli.py -q
+	uv run pytest tests/test_fix_preparation.py tests/test_fix_completion.py tests/test_fix_reliability.py tests/test_fix_runtime.py tests/test_fix_cli.py tests/test_fix_repetition.py -q

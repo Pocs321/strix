@@ -10,7 +10,8 @@ and available reproduction details. It makes a minimal fix, adds a regression te
 using the repository's framework, and hands test locations, commands, results, and
 failed approaches to review. Once it understands the affected path, it starts the
 change rather than expanding the investigation. It preserves legitimate behavior,
-not the behavior that enables the vulnerability.
+not the behavior that enables the vulnerability. Once its focused regression passes,
+repair hands off rather than expanding into the full customer suite.
 Review receives the finding, patch, repair summary, and command history. It runs
 the customer's relevant existing unit tests and the regression test, then judges
 whether the change addresses the issue without obvious regressions. It challenges
@@ -18,12 +19,26 @@ the repair's central assumption with the strongest plausible bypass and checks
 legitimate behavior. Required tests must pass, exercise the actual security decision,
 and include any helpers needed to reproduce them in the delivered patch. The reviewer
 can make small corrections and rerun affected tests. Optional hardening is follow-up
-work; a remaining path to the reported attack is not optional.
+work; a remaining path to the reported attack is not optional. Existing customer unit
+tests remain mandatory: start with the changed component and its direct consumers.
+Run the full suite only when small or justified by broad effects, explaining the
+reason before starting. Finish once the relevant tests pass, the attack is blocked,
+and legitimate use works; additional reassurance alone is not a reason to expand.
 
 Both agents use documented setup and targeted recovery, avoid repeating failed
 experiments without a new hypothesis, and hand off or report a blocker when they
-cannot progress. Test commands must retain their actual exit status. These are
+cannot progress. Unrelated failures are investigated enough to establish a baseline
+and then documented, without taking on repair of the entire test environment. Required
+validation that remains blocked is reported as a blocker. Test commands must retain
+their actual exit status. These are
 agent instructions, not a separate controller that selects or interprets tests.
+
+The existing fix hooks also warn when the same completed command, directory, shell,
+exit status, and process output recur three times within twelve recent completed
+commands. Timing and chunk IDs are excluded from the comparison. Changed results
+reset that command's history; native patch calls reset the window. Running commands
+and `write_stdin` polling are excluded. The warning asks the agent to change approach
+or hand off; it never blocks a tool, waives tests, or decides the review outcome.
 
 ## Completion and handoffs
 
