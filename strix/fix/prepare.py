@@ -323,7 +323,7 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
                 ),
             )
         # Location/snippet interpretation belongs to repair. Exact source identity is checked above.
-        while repair_turns < request.max_agent_turns and review_turns < request.max_agent_turns:
+        while repair_turns < request.repair_turn_limit and review_turns < request.review_turn_limit:
             if cancelled():
                 raise PreparationCancelledError
             context.attempt += 1
@@ -384,6 +384,7 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
             return await finish(
                 PreparationState.READY,
                 "Independent review approved the draft PR. See the review for validation results.",
+                gaps=verifier.gaps,
             )
         return await finish(
             PreparationState.BLOCKED,

@@ -7,11 +7,23 @@ one persistent sandbox. The assignments live in `strix/agents/prompts/fix_repair
 
 Repair receives the finding, evidence, affected locations, suggested remediation,
 and available reproduction details. It makes a minimal fix, adds a regression test
-using the repository's framework, and hands the test location and commands to review.
+using the repository's framework, and hands test locations, commands, results, and
+failed approaches to review. Once it understands the affected path, it starts the
+change rather than expanding the investigation. It preserves legitimate behavior,
+not the behavior that enables the vulnerability.
 Review receives the finding, patch, repair summary, and command history. It runs
 the customer's relevant existing unit tests and the regression test, then judges
-whether the change addresses the issue without obvious regressions. It can make
-small corrections and rerun affected tests. Optional improvements are follow-ups.
+whether the change addresses the issue without obvious regressions. It challenges
+the repair's central assumption with the strongest plausible bypass and checks
+legitimate behavior. Required tests must pass, exercise the actual security decision,
+and include any helpers needed to reproduce them in the delivered patch. The reviewer
+can make small corrections and rerun affected tests. Optional hardening is follow-up
+work; a remaining path to the reported attack is not optional.
+
+Both agents use documented setup and targeted recovery, avoid repeating failed
+experiments without a new hypothesis, and hand off or report a blocker when they
+cannot progress. Test commands must retain their actual exit status. These are
+agent instructions, not a separate controller that selects or interprets tests.
 
 ## Completion and handoffs
 
@@ -26,6 +38,10 @@ interpretation belong to the reviewer. Code checks source identity, requires a
 nonempty patch, and ensures delivery matches the final workspace approved by review.
 Reviewer corrections are included in that workspace. Changes after approval block
 delivery; they do not automatically start another repair.
+
+Malformed completion calls return the native tool error to the same agent so it can
+correct the call. The logging hook accepts non-JSON error text without crashing or
+mistaking it for successful completion. There is no additional retry loop.
 
 ## Files and evidence
 
@@ -44,6 +60,10 @@ The agents execute customer code only inside the sandbox. The host mirror is use
 for artifact construction. Changes are saved when an agent completes or is
 interrupted. Interrupted runs retain useful work without claiming approval.
 
+Native shell and filesystem tools resolve relative paths from the same staged
+repository root. Temporary checkpoint archives live under the sandbox's Git metadata
+and are excluded from exported source.
+
 The artifact contains the patch, changed files, `execution.json`,
 `agent-sessions.json`, and `tool-results.jsonl`. Logs stay outside repository source.
 Command records retain the output returned by native tools, including their output
@@ -53,14 +73,21 @@ security or coverage by themselves.
 
 ## Budgets and delivery
 
-`max_agent_turns` defaults to Strix's normal 500 turns per agent, counted across
-continuations. The configurable job deadline defaults to 7,200 seconds. An optional
+Repair defaults to 400 turns and review to 250, counted across continuations rather
+than reset on each handoff. Optional `max_repair_turns` and `max_review_turns` override
+the respective limit. The legacy `max_agent_turns` overrides both defaults; an explicit
+role limit takes precedence. Existing native turn warnings tell fix agents to finish
+their current work and hand off or decide, preserving partial work. Normal scan limits
+and warnings are unchanged. The configurable job deadline still defaults to 7,200 seconds. An optional
 `max_budget_usd` applies across both agents using SDK usage estimates. The legacy
 request field `max_repair_attempts` is accepted but does not control this loop.
 
 New results use `validation_mode: agent_review`. They contain the review decision,
 summary, final patch identity, and command history. The app delivers approved
-results as draft PRs and includes the review and testing limitations. Historical
+results as draft PRs and includes the review and testing limitations. Completion
+`open_items` become reported gaps and `final_recommendations` become follow-up notes,
+including on approved results. The CLI and draft PR show both; PRs put them before
+the command history. Historical
 `native_tests` and `paired` records remain readable by the app's compatibility code;
 new runs do not produce those proof structures.
 
@@ -85,7 +112,8 @@ strix fix --repo ./repo --request request.json --output ./fix-result/result.json
 ```
 
 `--workspace` is an alias for `--repo`. `--artifact` overrides the archive path;
-`--max-agent-turns`, `--timeout`, and `--max-budget` override request budgets.
+`--max-repair-turns`, `--max-review-turns`, the legacy `--max-agent-turns`, `--timeout`,
+and `--max-budget` override request budgets.
 Outputs are result JSON, a readable Markdown review, a patch, and the full ZIP
 artifact. Without `--output`, they go in a new `~/.strix/fixes/fix-…` directory
 outside the source checkout. If that location is itself inside the repository,

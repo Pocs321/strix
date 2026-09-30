@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from strix.config.settings import DEFAULT_MAX_TURNS
-
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -195,12 +193,23 @@ class FixPreparationRequestV1(ContractModel):
     checks: list[CommandSpec] = []
     # Accepted for old callers; the agent loop is bounded by turns/time instead.
     max_repair_attempts: int | None = Field(default=None, ge=1)
-    max_agent_turns: int = Field(default=DEFAULT_MAX_TURNS, ge=1, le=10000)
+    # Legacy shared override; role-specific limits take precedence when supplied.
+    max_agent_turns: int | None = Field(default=None, ge=1, le=10000)
+    max_repair_turns: int | None = Field(default=None, ge=1, le=10000)
+    max_review_turns: int | None = Field(default=None, ge=1, le=10000)
     timeout_seconds: int = Field(default=7200, ge=30, le=14400)
     max_budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     network_allowed: bool = False
     # Accept old empty requests, but never look up or forward host credentials.
     credentials_allowed: list[str] = Field(default=[], max_length=0, exclude=True)
+
+    @property
+    def repair_turn_limit(self) -> int:
+        return self.max_repair_turns or self.max_agent_turns or 400
+
+    @property
+    def review_turn_limit(self) -> int:
+        return self.max_review_turns or self.max_agent_turns or 250
 
 
 class CheckResult(ContractModel):
@@ -222,6 +231,7 @@ class VerifierResult(ContractModel):
     decision: VerificationDecision
     summary: str
     gaps: list[str] = []
+    notes: list[str] = []
     blocker: PreparationBlocker | None = None
     review_basis: Literal["execution", "code_review"] | None = None
     source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -232,6 +242,7 @@ class RepairOutcome(ContractModel):
     status: RepairStatus
     summary: str = Field(min_length=1)
     gaps: list[str] = []
+    notes: list[str] = []
     turns_used: int = Field(default=0, ge=0)
     blocker: PreparationBlocker | None = None
     command_results: list[CheckResult] = []

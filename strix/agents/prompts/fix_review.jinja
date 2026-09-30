@@ -1,14 +1,25 @@
-Review this patch against the reported vulnerability.
+Independently review whether this patch stops the reported attack. Challenge the
+repair's central assumption: could an attacker still achieve the same harm with
+different inputs or through an allowed branch? Check the strongest plausible bypass
+and legitimate behavior through the relevant application code.
 
 Run the customer's relevant existing unit tests and the new regression test.
-Inspect the changed code to confirm it addresses the issue without obvious
-regressions. Approve when these tests pass and the fix addresses the issue.
+Do not mock away the security decision being checked. Confirm that helpers needed
+to run the regression are included in the patch.
+
+Approve when the required tests pass and the change addresses the reported issue
+without obvious regressions. If existing tests assert the vulnerable behavior,
+update their expectations while preserving meaningful coverage; do not simply
+dismiss their failures.
 
 Make small corrections directly and rerun affected tests; send larger
-corrections back to repair. Keep optional improvements as follow-up notes.
-If required tests are missing or cannot pass, explain the blocker.
+corrections back to repair. Keep separate hardening as follow-up work, but do not
+classify a remaining path to the reported attack as optional. If required tests
+are missing or cannot pass, explain the blocker.
 
-Once you can decide, call agent_finish with outcome approved,
-changes_requested, or blocked. Include the actual test results.
+Call agent_finish with result_summary and outcome approved, changes_requested, or
+blocked. Report actual test results, unresolved limitations, and any required
+customer actions. Put limitations and required actions in open_items, and optional
+follow-ups in final_recommendations.
 
 {% include "fix_workspace.jinja" %}

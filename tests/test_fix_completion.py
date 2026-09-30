@@ -25,6 +25,7 @@ from openai.types.responses import (
 from strix.config.models import _completed_stream_event
 from strix.fix import PreparationState
 from strix.fix import runtime as fix_runtime
+from strix.interface.fix_cli import _summary
 from tests.test_fix_reliability import environment, existing_suite
 from tests.test_fix_runtime import _request, _workspace
 
@@ -68,12 +69,9 @@ class ScriptedModel(Model):
         self.responses = {"repair": repair, "review": review}
         self.inputs: dict[str, list[Any]] = {"repair": [], "review": []}
         self.tools: set[str] = set()
-        self.root: str = ""
 
     async def get_response(self, **kwargs: Any) -> ModelResponse:
-        role = (
-            "review" if "Review this patch against" in kwargs["system_instructions"] else "repair"
-        )
+        role = "review" if "Independently review" in kwargs["system_instructions"] else "repair"
         self.inputs[role].append(list(kwargs["input"]))
         self.tools.update(t.name for t in kwargs["tools"])
         assert self.responses[role], f"Unexpected additional {role} turn"
@@ -88,8 +86,6 @@ class ScriptedModel(Model):
             )
         else:
             arguments = json.loads(item.arguments)
-            if item.name == "exec_command":
-                arguments["workdir"] = self.root
             item = item.model_copy(
                 update={
                     "call_id": f"{role}-{len(self.inputs[role])}",
@@ -127,12 +123,17 @@ class ScriptedModel(Model):
 
 
 async def scenario(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel, turns: int = 30
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: ScriptedModel,
+    turns: int = 30,
+    *,
+    repair_turns: int | None = None,
+    review_turns: int | None = None,
 ) -> tuple[Any, Any]:
     workspace, _ = _workspace(tmp_path)
     commit = existing_suite(workspace)
     env = environment(workspace, tmp_path)
-    model.root = env.sandbox_workspace
     monkeypatch.setattr(
         fix_runtime,
         "_run_config",
@@ -142,6 +143,8 @@ async def scenario(
     )
     request = _request(commit)
     request.max_agent_turns = turns
+    request.max_repair_turns = repair_turns
+    request.max_review_turns = review_turns
     result = await fix_runtime.run_fix_preparation(
         request,
         workspace,
@@ -223,6 +226,89 @@ async def test_invalid_finish_outcome_is_corrected_through_native_tool(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_missing_finish_summary_is_corrected_without_crashing(tmp_path, monkeypatch):
+    model = ScriptedModel(
+        [*patch(), call("agent_finish", outcome="done"), finish("done")],
+        [*suite_commands(), call("agent_finish", outcome="approved"), finish("approved")],
+    )
+    result, _ = await scenario(tmp_path, monkeypatch, model)
+    assert result.state is PreparationState.READY, result.model_dump_json()
+    for role in ("repair", "review"):
+        error = json.dumps(model.inputs[role][-1])
+        assert "result_summary" in error and "Field required" in error
+    with zipfile.ZipFile(tmp_path / "prepared.zip") as archive:
+        assert b"Field required" in archive.read("tool-results.jsonl")
+
+
+@pytest.mark.asyncio
+async def test_completion_limitations_and_recommendations_survive_approval(tmp_path, monkeypatch):
+    limitation = "Production integration still requires customer credentials."
+    note = "Consider wider integration coverage."
+    model = ScriptedModel(
+        [
+            *patch(),
+            call(
+                "agent_finish",
+                outcome="done",
+                result_summary="Patch ready.",
+                open_items=["Reviewer must run existing tests."],
+                final_recommendations=["Repair follow-up."],
+            ),
+        ],
+        [
+            *suite_commands(),
+            call(
+                "agent_finish",
+                outcome="approved",
+                result_summary="Tests passed.",
+                open_items=[limitation],
+                final_recommendations=[note],
+            ),
+        ],
+    )
+    result, _ = await scenario(tmp_path, monkeypatch, model)
+    assert result.state is PreparationState.READY
+    assert result.verifier.gaps == result.gaps == [limitation]
+    assert result.verifier.notes == [note]
+    assert result.attempt_history[0].repair.notes == ["Repair follow-up."]
+    assert "Reviewer must run existing tests." in json.dumps(model.inputs["review"][0])
+    assert limitation in _summary(result)
+    assert note in _summary(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limited_role", ["repair", "review"])
+async def test_role_budget_is_cumulative_across_feedback(tmp_path, monkeypatch, limited_role):
+    model = ScriptedModel(
+        [*patch("incorrect"), finish("done"), *patch(), finish("done")],
+        [
+            *suite_commands(),
+            finish("changes_requested", "Correct the return value."),
+            *suite_commands(),
+            finish("approved"),
+        ],
+    )
+    result, _ = await scenario(
+        tmp_path,
+        monkeypatch,
+        model,
+        repair_turns=5 if limited_role == "repair" else 20,
+        review_turns=4 if limited_role == "review" else 20,
+    )
+    assert result.state is PreparationState.BLOCKED
+    assert result.attempts == 2
+    assert "budget" in result.stop_reason
+    assert len(model.inputs[limited_role]) == (5 if limited_role == "repair" else 4)
+    assert model.responses[limited_role]  # The budget stopped execution, not a scripted completion.
+    resumed_input = json.dumps(model.inputs[limited_role][3])
+    assert (
+        f"4/{5 if limited_role == 'repair' else 4} turns used across all handoffs" in resumed_input
+    )
+    assert "in-progress work is discarded" not in resumed_input
+    assert result.final_file_manifest
+
+
+@pytest.mark.asyncio
 async def test_blocked_tests_keep_patch_without_reopening_repair(tmp_path, monkeypatch):
     model = ScriptedModel(
         [*patch(), finish("done")],
@@ -282,9 +368,9 @@ async def test_patch_changed_after_approval_is_not_delivered_as_ready(tmp_path, 
 async def test_native_filesystem_patch_is_shared_with_reviewer(tmp_path, monkeypatch, chat_tools):
     monkeypatch.setattr(fix_runtime, "uses_chat_completions_tool_schema", lambda *_: chat_tools)
     production_patch = (
-        "*** Begin Patch\n*** Update File: {root}/app.py\n@@\n"
+        "*** Begin Patch\n*** Update File: app.py\n@@\n"
         "-    return 'unsafe'\n+    return 'safe'\n*** End Patch"
-    ).format(root=tmp_path / "execution" / "source")
+    )
     model = ScriptedModel(
         [call("apply_patch", patch=production_patch), patch()[1], finish("done")],
         [*suite_commands(), finish("approved")],

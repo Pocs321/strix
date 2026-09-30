@@ -23,10 +23,30 @@ from tests.test_fix_reliability import LocalSandbox, existing_suite
 from tests.test_fix_runtime import _git, _request, _workspace
 
 
+def test_cli_role_budget_overrides(tmp_path):
+    request = _request("a" * 40)
+    request.max_agent_turns = 500
+    path = tmp_path / "request.json"
+    path.write_text(request.model_dump_json())
+    args = fix_cli._parser().parse_args(
+        [
+            "--request",
+            str(path),
+            "--repo",
+            str(tmp_path),
+            "--max-repair-turns",
+            "400",
+            "--max-review-turns",
+            "250",
+        ]
+    )
+    loaded = fix_cli._load_request(args)
+    assert (loaded.repair_turn_limit, loaded.review_turn_limit) == (400, 250)
+
+
 def _local_runtime(monkeypatch, tmp_path, model):
     root = tmp_path / "execution" / "source"
     original_environment = fix_runtime._RuntimeEnvironment
-    model.root = str(root)
 
     async def sandbox(_sandbox_id):
         return LocalSandbox(root.parent)

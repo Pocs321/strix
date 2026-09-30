@@ -40,7 +40,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artifact", type=Path, help="Patch/log archive; defaults beside the result."
     )
-    parser.add_argument("--max-agent-turns", type=int)
+    parser.add_argument("--max-agent-turns", type=int, help="Shared override for both agents.")
+    parser.add_argument("--max-repair-turns", type=int, help="Repair turns across handoffs (400).")
+    parser.add_argument("--max-review-turns", type=int, help="Review turns across handoffs (250).")
     parser.add_argument("--max-budget", type=float, help="Combined LLM cost budget in USD.")
     parser.add_argument("--timeout", type=int, help="Whole-job timeout in seconds.")
     return parser
@@ -85,6 +87,8 @@ def _load_request(args: argparse.Namespace) -> FixPreparationRequestV1:
         key: value
         for key, value in {
             "max_agent_turns": args.max_agent_turns,
+            "max_repair_turns": args.max_repair_turns,
+            "max_review_turns": args.max_review_turns,
             "max_budget_usd": args.max_budget,
             "timeout_seconds": args.timeout,
         }.items()
@@ -122,6 +126,11 @@ def _summary(result: FixPreparationResultV1) -> str:
         gaps.append(result.blocker.user_action)
     if gaps:
         lines.extend(["", "## Remaining work", "", *dict.fromkeys(gaps)])
+    report = result.verifier or (
+        result.attempt_history[-1].repair if result.attempt_history else None
+    )
+    if report and report.notes:
+        lines.extend(["", "## Recommended follow-up", "", *dict.fromkeys(report.notes)])
     return "\n".join(lines) + "\n"
 
 

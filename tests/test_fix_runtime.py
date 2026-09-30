@@ -106,6 +106,18 @@ def test_run_fix_preparation_requires_sandbox() -> None:
     assert parameter.default is inspect.Parameter.empty
 
 
+def test_role_budgets_default_and_legacy_override() -> None:
+    request = _request("a" * 40)
+    assert (request.repair_turn_limit, request.review_turn_limit) == (400, 250)
+    request.max_agent_turns = 100
+    assert (request.repair_turn_limit, request.review_turn_limit) == (100, 100)
+    request.max_repair_turns = 180
+    request.max_review_turns = 80
+    assert (request.repair_turn_limit, request.review_turn_limit) == (180, 80)
+    restored = FixPreparationRequestV1.model_validate_json(request.model_dump_json())
+    assert (restored.repair_turn_limit, restored.review_turn_limit) == (180, 80)
+
+
 def test_runtime_rejects_repository_metadata_paths(tmp_path: Path) -> None:
     workspace = tmp_path / "repository"
     (workspace / ".git").mkdir(parents=True)

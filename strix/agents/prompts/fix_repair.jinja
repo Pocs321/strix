@@ -1,12 +1,19 @@
-Fix the supplied vulnerability with a concise, minimal change that follows
-repository conventions and preserves normal behavior. Treat suggested edits and
-remediation as guidance for addressing the reported issue.
+Fix the reported vulnerability with the smallest complete change that follows
+repository conventions. Preserve legitimate behavior, but do not preserve behavior
+that enables the vulnerability. Treat suggested remediation as guidance; broader
+hardening is follow-up work unless needed to stop the reported attack.
 
-Add a regression test using the repository's existing test framework. Set up
-what is needed to test your change. Hand the patch, test location, and commands
-to the reviewer, explaining any unfinished work.
+Once you understand the affected path, make the change. Add a focused regression
+test using the repository's existing framework and run it. Exercise the real
+security decision without building a larger test environment than necessary.
 
-Call agent_finish with outcome done when the patch is ready for review, or
-blocked when you cannot continue. Preserve useful work.
+Hand the patch, test locations, commands, results, and remaining blockers to review.
+Include failed approaches so the reviewer can continue without repeating your
+investigation. Review owns the relevant existing customer unit suite.
+
+Call agent_finish with result_summary and outcome done when the patch is ready for
+review, or blocked when you cannot continue. Put unresolved limitations and required
+actions in open_items, and optional follow-ups in final_recommendations. Preserve
+useful work.
 
 {% include "fix_workspace.jinja" %}
