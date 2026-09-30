@@ -133,24 +133,42 @@ class _FakeIAM:
         return {"PolicyDocument": self._inline_docs.get(kwargs.get("PolicyName"), {})}
 
 
+class _FakeEC2:
+    def __init__(self, groups: list[dict[str, Any]] | None = None) -> None:
+        self._groups = groups or []
+
+    def describe_security_groups(self, **_: Any) -> dict[str, Any]:
+        return {"SecurityGroups": self._groups}
+
+
+class _FakeSecretsManager:
+    def __init__(self, secrets: list[dict[str, Any]] | None = None) -> None:
+        self._secrets = secrets or []
+
+    def list_secrets(self, **_: Any) -> dict[str, Any]:
+        return {"SecretList": self._secrets}
+
+
 def _factory(
     *,
     sts: _FakeSTS | None = None,
     s3: _FakeS3 | None = None,
     iam: _FakeIAM | None = None,
+    ec2: _FakeEC2 | None = None,
+    secretsmanager: _FakeSecretsManager | None = None,
 ) -> Any:
     sts = sts or _FakeSTS({"Account": _ACCOUNT, "Arn": _ARN, "UserId": "AIDA"})
     s3 = s3 or _FakeS3()
     iam = iam or _FakeIAM()
+    ec2 = ec2 or _FakeEC2()
+    secretsmanager = secretsmanager or _FakeSecretsManager()
+    clients = {"sts": sts, "s3": s3, "iam": iam, "ec2": ec2, "secretsmanager": secretsmanager}
 
     def factory(service: str, _region: str | None) -> Any:
-        if service == "sts":
-            return sts
-        if service == "s3":
-            return s3
-        if service == "iam":
-            return iam
-        raise AssertionError(f"unexpected service {service!r}")
+        try:
+            return clients[service]
+        except KeyError:
+            raise AssertionError(f"unexpected service {service!r}") from None
 
     return factory
 
@@ -412,6 +430,73 @@ def test_iam_analyze_records_policy_fetch_errors() -> None:
     assert body["success"] is True
     assert body["overly_permissive"] is False
     assert any("managed:x" in e for e in body["errors"])
+
+
+# --- ec2 security groups -----------------------------------------------------
+
+def _ec2(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    set_active_policy(_policy())
+    aws.set_client_factory(_factory(ec2=_FakeEC2(groups)))
+    return json.loads(aws.ec2_list_open_security_groups("us-east-1"))
+
+
+def test_ec2_flags_world_open_sg() -> None:
+    perm = {
+        "IpProtocol": "tcp",
+        "FromPort": 22,
+        "ToPort": 22,
+        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+    }
+    body = _ec2([{"GroupId": "sg-1", "GroupName": "web", "IpPermissions": [perm]}])
+    assert body["has_world_open"] is True
+    group = body["world_open_groups"][0]
+    assert group["group_id"] == "sg-1"
+    assert group["open_ingress"][0]["from_port"] == 22
+    assert group["open_ingress"][0]["cidr"] == "0.0.0.0/0"
+
+
+def test_ec2_ignores_restricted_sg() -> None:
+    perm = {
+        "IpProtocol": "tcp",
+        "FromPort": 3306,
+        "ToPort": 3306,
+        "IpRanges": [{"CidrIp": "10.0.0.0/8"}],
+    }
+    body = _ec2([{"GroupId": "sg-2", "GroupName": "db", "IpPermissions": [perm]}])
+    assert body["has_world_open"] is False
+
+
+def test_ec2_flags_ipv6_world_open() -> None:
+    perm = {"IpProtocol": "-1", "Ipv6Ranges": [{"CidrIpv6": "::/0"}]}
+    body = _ec2([{"GroupId": "sg-3", "GroupName": "v6", "IpPermissions": [perm]}])
+    assert body["has_world_open"] is True
+    assert body["world_open_groups"][0]["open_ingress"][0]["cidr"] == "::/0"
+
+
+def test_ec2_refused_out_of_scope() -> None:
+    set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
+    refused = json.loads(aws.ec2_list_open_security_groups("us-east-1"))
+    assert refused["refused"] == "out_of_scope"
+
+
+# --- secrets manager ---------------------------------------------------------
+
+def test_secretsmanager_lists_names_only() -> None:
+    set_active_policy(_policy())
+    secrets = [{"Name": "prod/db", "ARN": "arn:...:prod/db", "RotationEnabled": True}]
+    aws.set_client_factory(_factory(secretsmanager=_FakeSecretsManager(secrets)))
+    body = json.loads(aws.secretsmanager_list_secrets("us-east-1"))
+    assert body["success"] is True
+    assert body["secret_count"] == 1
+    assert body["secrets"][0]["name"] == "prod/db"
+    assert body["secrets"][0]["rotation_enabled"] is True
+    assert "value" not in body["secrets"][0]  # never reads secret values
+
+
+def test_secretsmanager_refused_out_of_scope() -> None:
+    set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
+    refused = json.loads(aws.secretsmanager_list_secrets("us-east-1"))
+    assert refused["refused"] == "out_of_scope"
 
 
 # --- auto-wire (applicable_builtin_configs / configs_with_builtins) -----------

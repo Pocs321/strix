@@ -54,6 +54,8 @@ TOOL_NAMES = (
     "s3_get_object_head",
     "iam_list_principals",
     "iam_analyze_principal",
+    "ec2_list_open_security_groups",
+    "secretsmanager_list_secrets",
 )
 
 _INSTRUCTIONS = (
@@ -62,7 +64,10 @@ _INSTRUCTIONS = (
     "s3_get_bucket_public_status files a candidate, s3_get_object_head captures the "
     "bounded read that validates it. IAM: iam_list_principals for recon, "
     "iam_analyze_principal flags over-permissive (wildcard/admin) policies as a "
-    "candidate. No state-changing actions."
+    "candidate. EC2: ec2_list_open_security_groups flags inbound rules open to "
+    "0.0.0.0/0 (candidate). Secrets Manager: secretsmanager_list_secrets enumerates "
+    "secret names/metadata (never values). All regional tools take an optional "
+    "region. No state-changing actions."
 )
 
 # Seam so tests inject a fake boto3 client without real AWS. Signature:
@@ -462,6 +467,108 @@ def iam_analyze_principal(name: str, principal_type: str) -> str:
     )
 
 
+def _open_ingress_rules(permissions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the inbound rules open to the whole internet (``0.0.0.0/0`` or ``::/0``)."""
+    open_rules: list[dict[str, Any]] = []
+    for perm in permissions:
+        rule = {
+            "protocol": str(perm.get("IpProtocol", "")),
+            "from_port": perm.get("FromPort"),
+            "to_port": perm.get("ToPort"),
+        }
+        open_rules.extend(
+            {**rule, "cidr": "0.0.0.0/0"}
+            for entry in _as_list(perm.get("IpRanges"))
+            if entry.get("CidrIp") == "0.0.0.0/0"
+        )
+        open_rules.extend(
+            {**rule, "cidr": "::/0"}
+            for entry in _as_list(perm.get("Ipv6Ranges"))
+            if entry.get("CidrIpv6") == "::/0"
+        )
+    return open_rules
+
+
+def ec2_list_open_security_groups(region: str | None = None) -> str:
+    """List EC2 security groups with inbound rules open to the whole internet. Read-only.
+
+    Flags security groups whose ingress allows ``0.0.0.0/0`` (or ``::/0``), with the
+    exposed protocol/port range. A world-open group is a **candidate** (file it with
+    create_candidate) — validate by demonstrating an actual exposed service, not the
+    rule alone. Refused if the caller's account is not in scope.
+
+    Args:
+        region: AWS region to inspect (e.g. ``us-east-1``). Security groups are regional.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    try:
+        groups = _client("ec2", region).describe_security_groups().get("SecurityGroups", [])
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"ec2 describe_security_groups failed: {exc}", account=account, region=region)
+
+    world_open = []
+    for group in groups:
+        open_ingress = _open_ingress_rules(group.get("IpPermissions", []))
+        if open_ingress:
+            world_open.append(
+                {
+                    "group_id": str(group.get("GroupId") or ""),
+                    "group_name": str(group.get("GroupName") or ""),
+                    "vpc_id": str(group.get("VpcId") or ""),
+                    "open_ingress": open_ingress,
+                }
+            )
+    return ok(
+        account=account,
+        region=region,
+        has_world_open=bool(world_open),
+        world_open_groups=world_open,
+        note="Candidate signal only. Demonstrate an actual exposed service to validate.",
+    )
+
+
+def secretsmanager_list_secrets(region: str | None = None) -> str:
+    """List Secrets Manager secret names and metadata (never values). Read-only recon.
+
+    Enumerating secrets you can see is a **candidate**/recon signal. This tool
+    deliberately never calls GetSecretValue — reading a secret's value is sensitive
+    exfiltration and is out of scope for this read-only wrapper. Refused if the
+    caller's account is not in scope.
+
+    Args:
+        region: AWS region to inspect (e.g. ``us-east-1``). Secrets are regional.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    try:
+        secret_list = _client("secretsmanager", region).list_secrets().get("SecretList", [])
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"secretsmanager list_secrets failed: {exc}", account=account, region=region)
+
+    secrets = [
+        {
+            "name": str(item.get("Name") or ""),
+            "arn": str(item.get("ARN") or ""),
+            "rotation_enabled": bool(item.get("RotationEnabled", False)),
+        }
+        for item in secret_list
+    ]
+    return ok(
+        account=account,
+        region=region,
+        secret_count=len(secrets),
+        secrets=secrets,
+        note="Names/metadata only (values never read). Recon/candidate signal.",
+    )
+
+
 def build() -> FastMCP:
     """Build the AWS wrapper server with its read-only tools registered."""
     server = build_server("strix-aws", _INSTRUCTIONS)
@@ -471,6 +578,8 @@ def build() -> FastMCP:
     server.tool()(s3_get_object_head)
     server.tool()(iam_list_principals)
     server.tool()(iam_analyze_principal)
+    server.tool()(ec2_list_open_security_groups)
+    server.tool()(secretsmanager_list_secrets)
     return server
 
 

@@ -29,6 +29,8 @@ account being listed in `cloud.aws_account_ids`:
 | `s3_get_object_head` | bounded ≤1 KiB object read + SHA-256 (request + response captured) | **validated** evidence |
 | `iam_list_principals` | list IAM users and roles | recon |
 | `iam_analyze_principal` | read a user/role's managed + inline policies, flag wildcard/admin (`*`) grants | **candidate** signal |
+| `ec2_list_open_security_groups` | inbound rules open to `0.0.0.0/0` / `::/0`, with port range | **candidate** signal |
+| `secretsmanager_list_secrets` | secret names + metadata (never values) | recon |
 
 The wrapper returns evidence; the agent files it with `create_candidate` / `create_vulnerability_report`.
 

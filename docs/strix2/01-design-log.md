@@ -170,6 +170,14 @@ policy granting `*`" is a candidate, not a finding — validate by demonstrating
 the least-priv principal). Read-only; the analysis helper is pure and handles IAM's URL-encoded policy
 documents. `TOOL_NAMES` (single source of truth for the connection allowlist) updated; 12 more tests.
 
+**AWS wrapper — EC2 + Secrets Manager read-only (added).** `ec2_list_open_security_groups(region)` flags
+inbound rules open to `0.0.0.0/0` / `::/0` with the exposed protocol/port range (validator §4.3 explicitly
+lists "a security group open to `0.0.0.0/0`" as a **candidate**); `secretsmanager_list_secrets(region)`
+enumerates secret **names + metadata only** — it deliberately never calls `GetSecretValue` (reading a
+secret value is sensitive exfiltration, out of scope for this read-only wrapper). Both regional, scope-gated,
+read-only. 6 more tests (fake ec2/secretsmanager injected). The AWS wrapper now exposes 8 read-only tools
+(S3 ×4, IAM ×2, EC2 ×1, Secrets ×1).
+
 **Known verification gap.** The wrapper's *live* behavior (real subprocess spawn + MCP connect + real AWS)
 is not covered by an automated test — it needs AWS creds and a lab account. Unit tests cover scope gating,
 argument handling, evidence shaping, tool registration, and the config. A live integration test is
