@@ -58,7 +58,20 @@ Invoked in-sandbox via shell; not redistributed by this repo.
 > `masscan` and `checkov` are **not** in the current image; if wrapped later, add rows
 > (masscan: AGPL-3.0; checkov: Apache-2.0 — confirm at wrap time).
 
-## To be wrapped — Phase 1 (network / cloud / infra / API)
+## Landed — Phase 1 wrappers
+
+| Tool | Domain | How wrapped | License | Conf. |
+|---|---|---|---|---|
+| boto3 (AWS SDK) | cloud API calls (read-only validation PoC) | host-side MCP wrapper `strix/mcp_servers/aws.py`, **imported as a library** (not a subprocess) | Apache-2.0 | ✅ |
+
+> **boto3 is a library dependency, not an arm's-length subprocess**, so the "separate program"
+> reasoning above does not apply — but boto3 is Apache-2.0 (permissive), which is compatible with this
+> repo's Apache-2.0 license and imposes no copyleft obligation. It is already resolved transitively via
+> `litellm` (a core dependency), so the AWS wrapper adds **no new install requirement**. The wrapper is
+> read-only (STS identity, S3 recon + a bounded ≤1 KiB object read), runs host-side so AWS credentials
+> never enter the sandbox, and is scope-gated on `cloud.aws_account_ids` (fail-closed without a scope).
+
+## To be wrapped — later Phase 1/3 (network / cloud / infra / API)
 
 Rows are provisional targets; each is confirmed and promoted to ✅ when its wrapper lands.
 
@@ -67,9 +80,13 @@ Rows are provisional targets; each is confirmed and promoted to ✅ when its wra
 | prowler | cloud (AWS/Azure/GCP) misconfig | host-side MCP (creds stay on host) | Apache-2.0 ⚠️ |
 | ScoutSuite | cloud multi-provider audit | host-side MCP | GPL-2.0 ⚠️ |
 | CloudFox | cloud attack-path enum | host-side MCP | Apache-2.0 / MIT ⚠️ |
-| AWS CLI (botocore) | cloud API calls (validation PoC) | host-side MCP / native tool | Apache-2.0 ⚠️ |
-| checkov | IaC static analysis | in-sandbox or MCP | Apache-2.0 ⚠️ |
+| checkov | IaC static analysis | in-sandbox native/skill (tool runs in the sandbox) | Apache-2.0 ⚠️ |
 | nuclei | infra templated checks (already present) | native/skill sequencing | MIT ✅ |
+
+> **Network/infra tools are NOT host-side MCP wrappers.** They already live in the sandbox image and are
+> reachable via `exec_command`; a host-side MCP subprocess cannot see the sandbox. They gain the Strix 2
+> scope + candidate discipline as in-sandbox native tools / skills (Phase 2/3), not as MCP wrappers.
+> Host-side MCP is for tooling that must hold credentials off the sandbox (cloud) — see the design log.
 
 ## Method for confirming a license before wrapping
 1. Read the tool's `LICENSE` at the pinned version.

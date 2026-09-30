@@ -20,6 +20,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | `strix/report/writer.py` | +2 imports, `write_executive_report` appends a best-effort "Leads (unvalidated)" section via new `_strix2_leads_section()` | Surface candidate leads in the report `strix view` renders. Guarded/no-op when the candidate store is absent or empty, so upstream-only runs are unchanged. | 4 |
 | `strix/tools/mcp/agent_tools.py` | +1 import, `call_mcp` calls new `_scope_denial(arguments)` before dispatch | Enforce `scope.yaml` at the MCP boundary the brief names. No-op when no policy is loaded / no high-confidence target found, so upstream MCP behavior is unchanged. | 1 |
 | `strix/interface/cli_args.py` | Added `--scope-config` and `--allow-intrusive` flags → set `STRIX_SCOPE_CONFIG` / `STRIX_ALLOW_INTRUSIVE` env (mirrors the existing `--mcp-*` pattern) | Let the operator point at a scope file and gate intrusive actions from the CLI. | 1 |
+| `pyproject.toml` | +`boto3.*`/`botocore.*` to the mypy `ignore_missing_imports` overrides; +a ruff per-file `PLC0415` ignore for `strix/mcp_servers/aws.py` | boto3 ships no type stubs (mypy strict), and the wrapper imports boto3/botocore lazily so the main process never drags in the heavy SDK. Config-only; no product-code change. | 1 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -112,6 +113,50 @@ with tight `allowed_tools` — a separate, larger chunk not yet started.
 **Compatibility stance (documented):** enforcement is active only when a `scope.yaml` is loaded; absent,
 upstream web/MCP behavior is unchanged. The "fail-closed without scope" requirement applies to the new
 intrusive domains (network/cloud), enforced inside those tools when they land in Phase 3.
+
+### Phase 1 (cont.) — host-side MCP wrapper framework + first cloud wrapper
+
+**Architecture decision (brief vs. codebase-map — the map wins).** The brief lists Phase 1 as "stdio MCP
+servers wrapping nmap/naabu/masscan (network), prowler/… (cloud), nuclei/trivy/checkov (infra)". Verified
+against the code, an MCP `stdio` server is a **host-side subprocess** (`client._build_server` →
+`MCPServerStdio` → `stdio_client` spawns `command` on the host, in Strix's own venv). So:
+- **Cloud → host-side MCP wrapper.** Cloud tooling is genuinely absent from the sandbox and cloud creds
+  must stay *off* the sandbox (codebase-map §8). A host-side subprocess is exactly right: it holds creds on
+  the host and reuses `strix.scope` in-process. **This is where the MCP-wrapper mechanism pays off.**
+- **Network/infra → NOT host-side MCP.** Those CLIs already live *in the sandbox* and are reached via
+  `exec_command`; a host-side subprocess cannot see them. Wrapping them host-side would run against a host
+  that doesn't have the tools. They instead get the scope + candidate discipline as **in-sandbox native
+  tools / skills** (Phase 2/3), layered on the already-present CLIs — not as MCP wrappers.
+- **API contract testing** is pure-Python and host-runnable; a candidate for a later host-side wrapper or a
+  native tool. Deferred.
+
+**Built (framework):** `strix/mcp_servers/base.py` — `ScopeGuard` (loads the policy *in the subprocess*
+and gates targets **fail-closed for the new domains**: no `scope.yaml` ⇒ refuse, unlike the web/MCP
+boundary), `ok`/`error`/`result` JSON-string helpers (a `stdio` server must never `print` — stdout is the
+protocol), and `build_server` (a `FastMCP` stdio server). `mcp.server.fastmcp` and `boto3` are both already
+present (the latter transitively via `litellm`). Tests: `tests/test_strix2_mcp_wrapper_base.py` (8).
+
+**Built (AWS read-only wrapper):** `strix/mcp_servers/aws.py` — `aws_whoami` (STS identity → names the
+principal per validator decision 4.3a), `s3_list_buckets`, `s3_get_bucket_public_status` (composes a
+`looks_public` **candidate** signal from ACL/policy-status/public-access-block, read-only), and
+`s3_get_object_head` (a bounded **≤1 KiB** object read capturing request + response head + SHA-256 — the
+**validation evidence** per decisions 4.3b/5a). Every tool resolves the caller account via STS and refuses
+unless it is in `cloud.aws_account_ids`; all tools are read-only (no state change). A client-factory seam
+injects a fake boto3 in tests, so the suite needs no AWS creds or network. Tests:
+`tests/test_strix2_mcp_aws.py` (15). This exercises the acceptance walk-through (§8 of the validator doc):
+public-bucket signal → candidate; bounded read → validated evidence.
+
+**Registration model.** `strix/mcp_servers/registry.py::aws_wrapper_config()` emits the
+`McpConnectionConfig` (a `stdio` entry: `<python> -m strix.mcp_servers.aws`, tight `allowed_tools`,
+forwards `STRIX_SCOPE_CONFIG`/`STRIX_ALLOW_INTRUSIVE` to the subprocess). For now an operator registers it
+in `~/.strix/mcp-servers.json` (or `--mcp-config`); `builtin_wrapper_configs()` is the list a future
+auto-wire hook would attach at run start. CI blocking gate extended to lint+typecheck `strix/mcp_servers`.
+
+**Known verification gap.** The wrapper's *live* behavior (real subprocess spawn + MCP connect + real AWS)
+is not covered by an automated test — it needs AWS creds and a lab account. Unit tests cover scope gating,
+argument handling, evidence shaping, tool registration, and the config. A live integration test is
+deferred to an environment with credentials (or the managed cloud). Also to verify there: that the `mcp`
+`stdio` transport forwards the passthrough env and inherits CWD as assumed.
 
 ## Phase 4 — Generalized finding + PoC validator (in progress)
 
