@@ -61,6 +61,7 @@ from strix.fix.workspace import (
 )
 from strix.report.usage import LLMUsageLedger
 from strix.runtime import session_manager
+from strix.tools.processes import stop_process
 from strix.tools.thinking.tool import think
 from strix.utils.secret_files import open_secret_file
 
@@ -92,10 +93,26 @@ class _FixHooks(ReportUsageHooks):
         self.completion_digest: str | None = None
         self._recent_commands: deque[tuple[str, int, str]] = deque(maxlen=_REPEAT_WINDOW)
         self._repetition_warning = False
+        self.completion_error: str | None = None
+        self.agent_id = environment.execution_id
+        self._finish_errors: list[str] = []
+
+    async def before_finish(self, success: bool) -> str | None:
+        if not success:
+            return None
+        try:
+            await self.environment.checkpoint()
+            self.completion_digest = self.environment.validated_digest
+        except Exception as error:  # noqa: BLE001 - recover before lifecycle side effects
+            return f"Could not package this fix: {error}. Correct the workspace and finish again."
+        return None
 
     async def on_llm_start(
         self, context: Any, agent: Any, system_prompt: Any, input_items: Any
     ) -> None:
+        self.agent_id = str(context.context.get("agent_id", self.agent_id))
+        if self.completion_error:
+            raise RuntimeError(self.completion_error)
         if self.environment.cancelled():
             raise PreparationCancelledError
         limit = self.environment.max_budget_usd
@@ -163,7 +180,8 @@ class _FixHooks(ReportUsageHooks):
             f"[Fix turn budget] {turns_used}/{self.max_turns} total turns used. "
             f"{urgency} {action} Do not start new investigations. If required validation is "
             "incomplete, report it honestly; do not claim approval. Call agent_finish with "
-            "result_summary and outcome. Incomplete fixes will not be delivered."
+            "result_summary and success=True or success=False. "
+            "Incomplete fixes will not be delivered."
         )
 
     async def on_llm_end(
@@ -199,14 +217,12 @@ class _FixHooks(ReportUsageHooks):
             try:
                 completion = json.loads(raw)
             except json.JSONDecodeError:
-                # The SDK returns plain-text schema errors to the agent for correction.
-                return
-            if not isinstance(completion, dict):
-                return
-            completion = cast("dict[str, Any]", completion)
-            if completion.get("agent_completed") and completion.get("outcome") == "done":
-                await env.checkpoint()
-                self.completion_digest = env.validated_digest
+                completion = None
+            if not isinstance(completion, dict) or not completion.get("agent_completed"):
+                error = str(completion.get("error", raw)) if isinstance(completion, dict) else raw
+                self._finish_errors.append(error)
+                if self._finish_errors[-3:] == [error] * 3:
+                    self.completion_error = f"Completion failed three times: {error}"
             return
         if context.tool_name not in {"exec_command", "write_stdin"}:
             return
@@ -446,7 +462,7 @@ def build_fix_agent(*, name: str = "Fix agent", workspace_root: str) -> Any:
     agent = build_strix_agent(
         name=name,
         is_root=False,
-        base_tools=[think],
+        base_tools=[think, stop_process],
         instructions_override=render_fix_prompt(workspace_root=workspace_root),
         chat_completions_tools=uses_chat_completions_tool_schema(
             settings.llm.model or "", settings
@@ -458,9 +474,20 @@ def build_fix_agent(*, name: str = "Fix agent", workspace_root: str) -> Any:
         replace(
             tool,
             description=(
-                "Finish this assignment with result_summary and outcome: done or blocked. "
+                "Finish this assignment with result_summary and success=True when complete, "
+                "or success=False when blocked. "
                 "Summarize actual test results, blockers and optional follow-ups."
             ),
+            timeout_seconds=180,
+            params_json_schema={
+                **tool.params_json_schema,
+                "properties": {
+                    k: v for k, v in tool.params_json_schema["properties"].items() if k != "outcome"
+                },
+                "required": [
+                    k for k in tool.params_json_schema.get("required", []) if k != "outcome"
+                ],
+            },
         )
         if isinstance(tool, FunctionTool) and tool.name == "agent_finish"
         else tool
@@ -475,7 +502,6 @@ class _FixAgent:
     def __init__(self, environment: _RuntimeEnvironment) -> None:
         self.environment = environment
         self.agent_id = environment.execution_id
-        self.outcomes = ["done", "blocked"]
         self.hooks = _FixHooks(environment)
         self.session = open_agent_session(
             self.agent_id, environment.workspace.parent / "fix-agents.db"
@@ -486,7 +512,7 @@ class _FixAgent:
             "agent_id": self.agent_id,
             "parent_id": environment.parent_id or "fix-standalone",
             "sandbox_session": environment.session,
-            "completion_outcomes": self.outcomes,
+            "before_agent_finish": self.hooks.before_finish,
             "interactive": False,
         }
 
@@ -534,14 +560,9 @@ class _FixAgent:
                 completion = json.loads(completion)
             if isinstance(completion, dict):
                 completed = cast("dict[str, Any]", completion)
-                outcome = completed.get("outcome")
-                if (
-                    completed.get("agent_completed")
-                    and isinstance(outcome, str)
-                    and outcome in self.outcomes
-                ):
+                if completed.get("agent_completed"):
                     return _Completion(
-                        outcome,
+                        "done" if completed.get("task_success") is True else "blocked",
                         str(completed.get("summary", "")),
                         self.hooks.turns - start_turns,
                         open_items=list(completed.get("open_items") or []),
@@ -549,9 +570,16 @@ class _FixAgent:
                     )
             return _Completion(
                 "blocked",
-                "The agent stopped without a completion outcome; "
-                "no incomplete fix will be delivered.",
+                self.hooks.completion_error
+                or env.coordinator.errors.get(self.agent_id)
+                or "The agent stopped before completing; no incomplete fix will be delivered.",
                 self.hooks.turns - start_turns,
+            )
+        except RuntimeError:
+            if not self.hooks.completion_error:
+                raise
+            return _Completion(
+                "blocked", self.hooks.completion_error, self.hooks.turns - start_turns
             )
         except (MaxTurnsExceeded, BudgetExceededError):
             return _Completion(
@@ -742,10 +770,12 @@ async def finish_native_fix(
         except json.JSONDecodeError:
             raw = None
     raw = raw if isinstance(raw, dict) else {}
-    complete = raw.get("agent_completed") and raw.get("outcome") == "done"
+    complete = raw.get("agent_completed") and raw.get("task_success") is True
+    failure = hooks.completion_error or environment.coordinator.errors.get(hooks.agent_id)
     completion = RepairOutcome(
         status=RepairStatus.COMPLETE if complete else RepairStatus.BLOCKED,
         summary=raw.get("summary")
+        or failure
         or "The Fix agent stopped without completing required validation.",
         gaps=raw.get("open_items") or [],
         notes=raw.get("recommendations") or [],

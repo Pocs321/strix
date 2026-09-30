@@ -7,6 +7,7 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
@@ -35,6 +36,7 @@ from strix.core.sessions import (
 )
 from strix.llm import request_log
 from strix.llm.compaction import is_context_overflow, maybe_compact
+from strix.runtime.agent_session import AgentSandboxSession
 
 
 if TYPE_CHECKING:
@@ -1086,6 +1088,14 @@ async def _start_child_runner(
     child_ctx["agent_id"] = child_id
     child_ctx["parent_id"] = parent_id
     child_ctx["task"] = task
+    if run_config.sandbox and run_config.sandbox.session:
+        sandbox = run_config.sandbox.session
+        # Fix tasks already supply their worktree and process scope. Normal children
+        # receive their own scope while keeping the shared assessment directory.
+        if not parent_ctx.get("before_agent_finish"):
+            sandbox = AgentSandboxSession(sandbox, sandbox.state.manifest.root, child_id)
+        child_ctx["sandbox_session"] = sandbox
+        run_config = replace(run_config, sandbox=replace(run_config.sandbox, session=sandbox))
 
     async def _child_loop() -> None:
         # A budget stop is a clean scan-wide shutdown, not a child failure: the

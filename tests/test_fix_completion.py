@@ -45,7 +45,7 @@ def call(name: str, **arguments: Any) -> ResponseFunctionToolCall:
 
 
 def finish(outcome: str, summary: str = "Fix and validation results reviewed.") -> Any:
-    return call("agent_finish", outcome=outcome, result_summary=summary)
+    return call("agent_finish", success=outcome == "done", result_summary=summary)
 
 
 def shell(cmd: str) -> Any:
@@ -204,11 +204,17 @@ async def test_blocked_or_capped_agent_discards_patch(tmp_path, monkeypatch, end
 
 
 @pytest.mark.asyncio
-async def test_native_lifecycle_retries_invalid_outcome(tmp_path, monkeypatch):
-    model = ScriptedModel([*patch(), finish("approved"), *suite_commands(), finish("done")])
+async def test_native_lifecycle_ignores_legacy_quoted_outcome(tmp_path, monkeypatch):
+    model = ScriptedModel(
+        [
+            *patch(),
+            *suite_commands(),
+            call("agent_finish", outcome='"done"', success=True, result_summary="Complete"),
+        ]
+    )
     result, _ = await scenario(tmp_path, monkeypatch, model)
     assert result.state is PreparationState.READY
-    assert result.completion.turns_used == 6
+    assert result.completion.turns_used == 5
 
 
 @pytest.mark.asyncio
@@ -267,3 +273,57 @@ async def test_fix_respects_live_scan_budget_without_double_counting(tmp_path, m
             ModelResponse(output=[], usage=Usage(requests=1), response_id=None),
         )
     assert len(recorded) == 1
+
+
+@pytest.mark.asyncio
+async def test_dependency_symlink_does_not_hide_new_source_or_regression(tmp_path, monkeypatch):
+    model = ScriptedModel(
+        [
+            *patch(),
+            shell("ln -s /tmp node_modules"),
+            shell("printf 'VALUE = 1\\n' > helper.py"),
+            *suite_commands(),
+            finish("done"),
+        ]
+    )
+    result, _ = await scenario(tmp_path, monkeypatch, model)
+    assert result.state is PreparationState.READY, result.stop_reason
+    with zipfile.ZipFile(tmp_path / "prepared.zip") as artifact:
+        names = artifact.namelist()
+        assert "files/helper.py" in names and "files/tests/test_security.py" in names
+        assert not any("node_modules" in name for name in names)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_is_correctable_before_completion(tmp_path, monkeypatch):
+    model = ScriptedModel(
+        [
+            *patch(),
+            shell("ln -s app.py helper.py"),
+            finish("done"),
+            shell("rm helper.py"),
+            *suite_commands(),
+            finish("done"),
+        ]
+    )
+    result, _ = await scenario(tmp_path, monkeypatch, model)
+    assert result.state is PreparationState.READY, result.stop_reason
+    assert any("Could not package this fix" in str(items) for items in model.inputs["repair"])
+
+
+@pytest.mark.asyncio
+async def test_three_identical_completion_errors_stop_with_real_reason(tmp_path, monkeypatch):
+    model = ScriptedModel(
+        [
+            *patch(),
+            shell("ln -s app.py helper.py"),
+            finish("done"),
+            finish("done"),
+            finish("done"),
+        ]
+    )
+    result, _ = await scenario(tmp_path, monkeypatch, model, turns=300)
+    assert result.state is PreparationState.BLOCKED
+    assert result.completion.turns_used == 6
+    assert "Completion failed three times" in result.completion.summary
+    assert not (tmp_path / "prepared.zip").exists()

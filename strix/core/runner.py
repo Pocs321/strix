@@ -377,11 +377,16 @@ async def run_strix_scan(
             prompt_cache=settings.llm.prompt_cache,
             extra_headers=settings.llm.extra_headers,
         )
+        from strix.runtime.agent_session import AgentSandboxSession
+
+        root_sandbox = AgentSandboxSession(
+            sandbox_session, sandbox_session.state.manifest.root, root_id
+        )
         run_config = RunConfig(
             model=resolved_model,
             model_provider=StrixProvider(),
             model_settings=model_settings,
-            sandbox=SandboxRunConfig(client=bundle["client"], session=bundle["session"]),
+            sandbox=SandboxRunConfig(client=bundle["client"], session=root_sandbox),
             trace_include_sensitive_data=False,
             # A hallucinated tool name is a recoverable model mistake, not a scan-ending
             # error: hand it back as a tool result so the agent can correct itself.
@@ -533,25 +538,15 @@ async def run_strix_scan(
             )
             return await start_child_agent(**{**options, **kwargs})
 
-        async def spawn_child_agent(**kwargs: Any) -> dict[str, Any]:
-            finding_id = kwargs.pop("fix_finding_id", None)
-            if finding_id is not None:
-                if fixes is None:
-                    raise ValueError(  # noqa: TRY301 - actionable tool error
-                        "Fix agents require repository source in a non-interactive scan."
-                    )
-                return await fixes.spawn(finding_id, native_child, **kwargs)
-            return await native_child(**kwargs)
-
         context: dict[str, Any] = {
             "coordinator": coordinator,
-            "sandbox_session": bundle["session"],
+            "sandbox_session": root_sandbox,
             "caido_client": bundle["caido_client"],
             "mcp_registry": mcp_registry,
             "agent_id": root_id,
             "parent_id": None,
             "interactive": interactive,
-            "spawn_child_agent": spawn_child_agent,
+            "spawn_child_agent": native_child,
             "scan_targets": build_scan_targets(scan_config),
             "max_context_images": settings.runtime.max_context_images,
         }
@@ -560,9 +555,9 @@ async def run_strix_scan(
         sessions_to_close.append(root_session)
         await coordinator.attach_runtime(root_id, session=root_session)
 
+        if fixes is not None:
+            fixes.start(native_child, context)
         if is_resume:
-            if fixes is not None:
-                await fixes.restore(native_child, context)
             await respawn_subagents(
                 coordinator=coordinator,
                 factory=child_agent_builder,
@@ -690,6 +685,7 @@ async def run_strix_scan(
         report_state = get_global_report_state()
         if report_state is not None:
             report_state.defer_completion = False
+            report_state.finding_persisted_callback = None
         configure_spill_writer(None)
         # Settle descendants before closing sessions: on a clean finish a child
         # can still be mid-turn, and closing its session underneath it crashes it.

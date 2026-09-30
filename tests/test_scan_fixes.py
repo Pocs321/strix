@@ -1,12 +1,11 @@
-"""Fix delegation through the native create_agent tool, child loop and worktrees."""
+"""Persisted findings launch native Fix children in isolated worktrees."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from agents import RunConfig
@@ -21,7 +20,6 @@ from strix.fix import scan as scan_module
 from strix.fix.scan import ScanFixes
 from strix.fix.session import WorktreeSession
 from strix.report.state import ReportState
-from strix.tools.agents_graph.tools import create_agent
 from tests.test_fix_completion import ScriptedModel, finish, patch, suite_commands
 from tests.test_fix_reliability import LocalSandbox, existing_suite
 from tests.test_fix_runtime import _git, _request, _workspace
@@ -65,6 +63,8 @@ def setup(tmp_path):
         finding_id = kwargs.pop("fix_finding_id")
         return await fixes.spawn(finding_id, native, **kwargs)
 
+    fixes._native_spawn = native
+
     context = ToolContext(
         tool_name="create_agent",
         tool_call_id="spawn-test",
@@ -79,21 +79,19 @@ def setup(tmp_path):
     return fixes, report, source, parent, reports, context, sessions
 
 
-async def delegate(context, finding_id="finding"):
-    return json.loads(
-        await create_agent.on_invoke_tool(
-            context,
-            json.dumps(
-                {
-                    "name": "Fix agent",
-                    "task": "Fix the saved issue and run regression and customer tests.",
-                    "skills": [],
-                    "inherit_context": False,
-                    "fix_finding_id": finding_id,
-                }
-            ),
+async def delegate(context, finding_id="finding", **options):
+    try:
+        return await context.context["spawn_child_agent"](
+            fix_finding_id=finding_id,
+            parent_ctx=context.context,
+            name="Fix agent",
+            task="Fix the saved issue and test it.",
+            skills=[],
+            parent_history=[],
+            **options,
         )
-    )
+    except ValueError as error:
+        return {"success": False, "error": str(error)}
 
 
 @pytest.mark.asyncio
@@ -151,8 +149,8 @@ async def test_delegation_errors_reach_reporting_agent_before_any_model_call(tmp
     assert "300-turn" in (await delegate(context))["error"]
     fixes.records.clear()
     fixes.sink = AsyncMock(side_effect=RuntimeError("Missing callback configuration"))
-    result = await delegate(context)
-    assert not result["success"] and "Missing callback configuration" in result["error"]
+    with pytest.raises(RuntimeError, match="Missing callback configuration"):
+        await delegate(context)
     assert not fixes.tasks
 
 
@@ -226,18 +224,70 @@ async def test_native_child_keeps_cumulative_turn_cap_and_does_not_export_partia
 
 
 @pytest.mark.asyncio
-async def test_saving_report_does_not_launch_until_reporting_agent_delegates(tmp_path, monkeypatch):
-    fixes, report, _, _, _, context, sessions = setup(tmp_path)
+async def test_seven_saved_findings_start_seven_native_children_without_model_handoff(
+    tmp_path, monkeypatch
+):
+    fixes, report, source, _, _, context, sessions = setup(tmp_path)
     state = ReportState("native-handoff")
     state._run_dir = tmp_path / "report"
     fixes.report_state = state
-    report_id = state.add_vulnerability_report(
-        title="Unsafe result",
-        severity="high",
-        validation_status="confirmed",
-        fix_candidate=report["fix_candidate"],
+    monkeypatch.setattr(
+        scan_module,
+        "_run_config",
+        lambda env: RunConfig(
+            model=ScriptedModel([*patch(), *suite_commands(), finish("done")]),
+            sandbox=SandboxRunConfig(session=env.session),
+            tracing_disabled=True,
+        ),
     )
-    assert not fixes.tasks
+    stages = []
+
+    async def sink(stage, report, _result, _artifact):
+        stages.append((stage, report["id"]))
+        return True
+
+    fixes.sink = sink
+    fixes.start(fixes._native_spawn, context.context)
+    ids = [
+        state.add_vulnerability_report(
+            title=f"Unsafe result {i}",
+            severity="high",
+            agent_id="reporter",
+            validation_status="confirmed",
+            fix_candidate=report["fix_candidate"],
+        )
+        for i in range(7)
+    ]
+    # Replayed/no-op notifications must not create extra jobs.
+    for saved in state.get_existing_vulnerabilities():
+        fixes.notify(saved)
+    await fixes.wait()
+    assert set(fixes.records) == set(ids)
+    assert all(r["status"] == "done" for r in fixes.records.values()), fixes.records
+    assert len([s for s in stages if s[0] == "started"]) == 7
+    assert _git(source, "status", "--porcelain") == ""
+    for session in sessions:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_does_not_launch(tmp_path):
+    fixes, report, _, _, _, context, _ = setup(tmp_path)
+    state = ReportState("failed-persistence")
+    state._run_dir = tmp_path / "report"
+    fixes.report_state = state
+    fixes.start(fixes._native_spawn, context.context)
+    state.vulnerability_found_callback = Mock(side_effect=RuntimeError("Database rejected finding"))
+    with pytest.raises(RuntimeError, match="Database rejected"):
+        state.add_vulnerability_report(
+            title="Unsafe", severity="high", fix_candidate=report["fix_candidate"]
+        )
+    assert not fixes.dispatches and not fixes.tasks
+
+
+@pytest.mark.asyncio
+async def test_explicit_retry_gets_new_agent_with_remaining_turns(tmp_path, monkeypatch):
+    fixes, _, _, _, _, context, sessions = setup(tmp_path)
     monkeypatch.setattr(
         scan_module,
         "_run_config",
@@ -247,9 +297,13 @@ async def test_saving_report_does_not_launch_until_reporting_agent_delegates(tmp
             tracing_disabled=True,
         ),
     )
-    spawned = await delegate(context, report_id)
-    assert spawned["success"], spawned
+    first = await delegate(context)
+    await fixes.tasks["finding"]
+    again = await delegate(context)
+    assert not again["success"]
+    second = await delegate(context, retry=True)
     await fixes.wait()
-    assert fixes.coordinator.parent_of[spawned["agent_id"]] == "reporter"
+    assert second["agent_id"] != first["agent_id"]
+    assert fixes.records["finding"]["turns"] == 2
     for session in sessions:
         session.close()

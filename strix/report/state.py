@@ -240,6 +240,7 @@ class ReportState:
 
         self.caido_url: str | None = None
         self.defer_completion = False
+        self.finding_persisted_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_found_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_updated_callback: Callable[[dict[str, Any]], None] | None = None
         self.vulnerability_deleted_callback: Callable[[dict[str, Any]], None] | None = None
@@ -446,6 +447,7 @@ class ReportState:
         scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
 
         self.save_run_data()
+        self.notify_finding_persisted(report)
         return report_id
 
     def _deleted_vulnerability_reports(self) -> list[dict[str, Any]]:
@@ -562,6 +564,7 @@ class ReportState:
         )
 
         self.save_run_data()
+        self.notify_finding_persisted(report)
         return report
 
     def delete_vulnerability_report(
@@ -644,7 +647,13 @@ class ReportState:
             logger.exception("could not remove %s", md_path)
 
         logger.info("Deleted vulnerability report %s - %s", report_id, report.get("title"))
+        self.notify_finding_persisted(report)
         return report
+
+    def notify_finding_persisted(self, report: dict[str, Any]) -> None:
+        """Called only after hosted persistence and local report saving succeed."""
+        if self.finding_persisted_callback:
+            self.finding_persisted_callback(report)
 
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)

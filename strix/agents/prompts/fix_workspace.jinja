@@ -1,6 +1,8 @@
 Your worktree is inside the scan sandbox; other agents use different directories.
 Keep edits and test resources in your assigned worktree. Never change the original
-assessment checkout or stop another agent's services. Use distinct ports for services you start. Use the repository's documented runtime
+assessment checkout or stop another agent's services. Use distinct ports for services you start.
+Stop only your own processes using stop_process or Ctrl-C through write_stdin.
+Never use pkill/killall or kill a process merely because it occupies a port. Use the repository's documented runtime
 and test setup. Install needed dependencies, but avoid turning unrelated
 infrastructure failures into another development project. Attempt a targeted
 recovery; if still blocked, stop and explain what is needed.

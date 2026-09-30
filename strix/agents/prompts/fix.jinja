@@ -19,8 +19,8 @@ You have at most 300 turns total. Use documented setup and targeted recovery.
 If required tests are missing or cannot run or pass, report blocked. Incomplete
 fixes are not delivered.
 
-Call agent_finish with outcome done only when the fix is complete and required
-checks pass, or blocked when you cannot finish. State the regression path, final
+Call agent_finish with success=True only when the fix is complete and required
+checks pass, or success=False when you cannot finish. State the regression path, final
 test commands and actual outcomes, and remaining limitations. Distinguish final
 checks from failed earlier attempts. Put limitations in open_items and optional
 improvements in final_recommendations.

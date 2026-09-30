@@ -1,4 +1,4 @@
-"""Finding worktrees and delivery for Fix children spawned through create_agent."""
+"""Persisted findings start Fix children through the native agent lifecycle."""
 
 from __future__ import annotations
 
@@ -73,11 +73,57 @@ class ScanFixes:
         self.hooks, self.event_sink, self.sink = hooks, event_sink, sink
         self.report_state = report_state
         self.tasks: dict[str, asyncio.Task[Any]] = {}
+        self.dispatches: set[asyncio.Task[Any]] = set()
         self.closed = False
         self.base = f"/workspace/.strix-fixes/{hashlib.sha256(scan_id.encode()).hexdigest()[:16]}"
         self._source_lock = asyncio.Lock()
         self._finding_locks: dict[str, asyncio.Lock] = {}
         self._staged: set[str] = set()
+
+    def start(self, spawn: Any, parent_ctx: dict[str, Any]) -> None:
+        self._native_spawn, self._parent_ctx = spawn, parent_ctx
+        self.report_state.finding_persisted_callback = self.notify
+        for report in self.report_state.get_existing_vulnerabilities():
+            self.notify(report)
+
+    def notify(self, report: dict[str, Any]) -> None:
+        if self.closed:
+            return
+        task = asyncio.create_task(self._dispatch(str(report["id"])))
+        self.dispatches.add(task)
+        task.add_done_callback(self.dispatches.discard)
+
+    async def _dispatch(self, finding_id: str) -> None:
+        try:
+            report, _ = self._finding(finding_id)
+            parent_id = report.get("agent_id") or self._parent_ctx["agent_id"]
+            await self.spawn(
+                finding_id,
+                self._native_spawn,
+                parent_ctx={**self._parent_ctx, "agent_id": parent_id},
+                name=f"Fix: {report.get('title', finding_id)}",
+                task="Implement and validate the saved finding in your assigned worktree.",
+                skills=[],
+                parent_history=[],
+            )
+        except Exception as error:  # noqa: BLE001 - report launch failure to the scan
+            active = self.tasks.get(finding_id)
+            if active and not active.done():
+                active.cancel()
+                await asyncio.gather(active, return_exceptions=True)
+            logger.warning("fix.dispatch finding=%s rejected=%s", finding_id, error)
+            await self.coordinator.send(
+                self._parent_ctx["agent_id"],
+                {
+                    "from": "fix-runtime",
+                    "type": "information",
+                    "priority": "normal",
+                    "content": (
+                        f"Fix for {finding_id} was not started: {error}. "
+                        "Do not create a replacement scan child to repair it."
+                    ),
+                },
+            )
 
     def _save(self) -> None:
         temporary = self.path.with_suffix(".tmp")
@@ -97,7 +143,9 @@ class ScanFixes:
         if report is None:
             raise ValueError("Save the vulnerability report before requesting its Fix agent.")
         report = deepcopy(report)
-        candidate = FixCandidateV1.model_validate(report.get("fix_candidate"))
+        if not report.get("fix_candidate"):
+            raise ValueError("The finding has no source-backed fix candidate.")
+        candidate = FixCandidateV1.model_validate(report["fix_candidate"])
         if (
             report.get("validation_status") not in {None, "confirmed"}
             or not candidate.finding
@@ -128,21 +176,28 @@ class ScanFixes:
             return await self._spawn(finding_id, spawn, **kwargs)
 
     async def _spawn(self, finding_id: str, spawn: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: PLR0915
-        if self.closed:
-            raise ValueError("The scan is no longer accepting Fix agents.")
         report, candidate = self._finding(finding_id)
         assert candidate.source_identity is not None
         digest = candidate.digest()
         previous = self.records.get(finding_id, {})
         running = self.tasks.get(finding_id)
         same = previous.get("digest") == digest
-        if same and previous.get("agent_id") and (running or previous.get("status") != "running"):
+        if (
+            same
+            and previous.get("agent_id")
+            and ((running and not running.done()) or previous.get("status") == "done")
+        ):
             return {
                 "success": True,
                 "agent_id": previous["agent_id"],
                 "status": previous["status"],
                 "message": "This finding already has a Fix agent.",
             }
+        retry = kwargs.pop("retry", False)
+        if same and previous.get("status") in {"stopped", "failed"} and not retry:
+            raise ValueError(
+                previous.get("reason") or "The previous Fix attempt failed; it was not restarted."
+            )
         if running and not running.done():
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
@@ -160,7 +215,7 @@ class ScanFixes:
         borrowed, base, started = None, None, False
         source = self.sources[0]
         try:
-            if not await self._emit("started", report):
+            if not await self._emit("retrying" if retry and same else "started", report):
                 raise ValueError(  # noqa: TRY301 - resource cleanup must surround setup
                     "The app declined this fix registration; check the current finding and attempt."
                 )
@@ -238,17 +293,21 @@ class ScanFixes:
                         request, environment, hooks, result, session, artifact
                     )
                     prepared.elapsed_seconds = time.monotonic() - started_at
-                    await self._emit(
+                    delivered = await self._emit(
                         "finished",
                         report,
                         prepared,
                         artifact if prepared.state == "ready" else None,
                     )
+                    if not delivered:
+                        raise RuntimeError("The app declined the completed Fix result")  # noqa: TRY301
                     record["status"] = "done" if prepared.state == "ready" else "stopped"
+                    record["reason"] = prepared.stop_reason
                     if prepared.state == "ready":
                         record["artifact"] = str(artifact)
-                except Exception:
+                except Exception as error:
                     record["status"] = "stopped"
+                    record["reason"] = str(error)
                     logger.exception("Fix completion delivery failed for %s", finding_id)
                     with contextlib.suppress(Exception):
                         await self._emit("finished", report)
@@ -262,7 +321,7 @@ class ScanFixes:
             parent_ctx = {
                 **kwargs["parent_ctx"],
                 "sandbox_session": borrowed,
-                "completion_outcomes": ["done", "blocked"],
+                "before_agent_finish": hooks.before_finish,
             }
             assignment = _untrusted_prompt_data(
                 {
@@ -291,13 +350,14 @@ class ScanFixes:
             self.tasks[finding_id] = self.coordinator.runtimes[spawned["agent_id"]].task
             self._save()
             return cast("dict[str, Any]", spawned)
-        except BaseException:
+        except BaseException as error:
             if started:
                 with contextlib.suppress(Exception):
                     await self._emit("finished", report)
             await self._cleanup(borrowed, base, root, directory)
             if finding_id in self.records:
                 self.records[finding_id]["status"] = "stopped"
+                self.records[finding_id]["reason"] = str(error)
                 self._save()
             raise
 
@@ -310,31 +370,16 @@ class ScanFixes:
                 await self._exec("git", "-C", base, "worktree", "remove", "--force", root)
         shutil.rmtree(directory / "source", ignore_errors=True)
 
-    async def restore(self, spawn: Any, parent_ctx: dict[str, Any]) -> None:
-        # Restore only children explicitly created before interruption, never new findings.
-        for finding_id, record in list(self.records.items()):
-            if record.get("status") != "running" or not record.get("agent_id"):
-                continue
-            try:
-                await self.spawn(
-                    finding_id,
-                    spawn,
-                    parent_ctx={**parent_ctx, "agent_id": record["parent_id"]},
-                    name=record["name"],
-                    task=record["task"],
-                    skills=[],
-                    parent_history=[],
-                )
-            except Exception:
-                logger.exception("Could not restore Fix child for %s", finding_id)
-                await self.coordinator.set_status(record["agent_id"], "stopped")
-
     async def wait(self) -> None:
         self.closed = True
+        await asyncio.gather(*self.dispatches, return_exceptions=True)
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
 
     async def close(self) -> None:
         self.closed = True
+        for task in self.dispatches:
+            task.cancel()
+        await asyncio.gather(*self.dispatches, return_exceptions=True)
         for task in self.tasks.values():
             if not task.done():
                 task.cancel()

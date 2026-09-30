@@ -45,6 +45,7 @@ from strix.tools.notes.tools import (
 )
 from strix.tools.nullish import is_nullish
 from strix.tools.output_store import bound_and_store, bound_text
+from strix.tools.processes import stop_process
 from strix.tools.proxy.tools import (
     list_requests,
     list_sitemap,
@@ -441,6 +442,14 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
         except (json.JSONDecodeError, TypeError):
             parsed = None
         if isinstance(parsed, dict):
+            # Guard against accidental shared-sandbox cleanup, not adversarial code.
+            command = str(parsed.get("cmd", ""))
+            if re.search(r"(?:^|[\s;/|&()`])(?:pkill|killall|kill)(?:\s|$)", command):
+                return (
+                    "Use stop_process(pid) for your own background process, "
+                    "or Ctrl-C through write_stdin. "
+                    "Shared-sandbox process cleanup is not allowed."
+                )
             if "shell" not in parsed:
                 parsed["shell"] = "bash"
             _apply_shell_output_cap(parsed)
@@ -567,6 +576,7 @@ def _finish_tool_use_behavior(
 
 _BASE_TOOLS: tuple[Tool, ...] = (
     think,
+    stop_process,
     load_skill,
     create_todo,
     list_todos,

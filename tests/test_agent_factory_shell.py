@@ -132,3 +132,15 @@ def test_specialized_tools_do_not_inherit_scan_or_registered_tools(monkeypatch) 
     assert (
         not {"scan_extension", "create_agent", "record_coverage", "finish_scan"} & specialized_names
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command", ["pkill -f server", "sudo killall node", "kill $(lsof -ti:3007)", "/bin/kill -9 123"]
+)
+async def test_shared_process_cleanup_is_rejected_before_execution(command):
+    captured = {}
+    wrapped = factory._wrap_exec_command(_capturing_exec_tool(captured))
+    result = await wrapped.on_invoke_tool(None, json.dumps({"cmd": command}))
+    assert "stop_process" in result
+    assert not captured

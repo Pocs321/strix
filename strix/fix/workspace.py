@@ -144,6 +144,17 @@ current = set(
 ) - {""}
 paths = original | current
 
+# Only untracked environment artifacts are excluded. A tracked dependency,
+# generated file, or genuine source symlink remains part of the source delta.
+environment_roots = {
+    "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", "coverage", ".coverage", ".nyc_output",
+}
+current = {
+    name for name in current
+    if name in original or not environment_roots.intersection(pathlib.PurePosixPath(name).parts)
+}
+
 
 def safe(name):
     p = root / name
@@ -164,6 +175,10 @@ changed = set(
     git("diff", "--name-only", "--no-renames", "-z", base).decode().split("\0")
 ) - {""}
 changed |= current - original
+changed = {
+    name for name in changed
+    if name in original or not environment_roots.intersection(pathlib.PurePosixPath(name).parts)
+}
 changed.discard(str(pathlib.Path(sys.argv[3]).relative_to(root)))
 manifest = []
 with tarfile.open(sys.argv[3], "w") as archive:
