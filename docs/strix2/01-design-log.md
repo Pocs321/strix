@@ -24,6 +24,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | `pyproject.toml` | +`boto3.*`/`botocore.*` to the mypy `ignore_missing_imports` overrides; +a ruff per-file `PLC0415` ignore for `strix/mcp_servers/aws.py` | boto3 ships no type stubs (mypy strict), and the wrapper imports boto3/botocore lazily so the main process never drags in the heavy SDK. Config-only; no product-code change. | 1 |
 | `strix/agents/factory.py` | +1 import; `_wrap_exec_command` calls `enforce_shell_command(command)` before dispatch and returns a refusal string if out of scope | Enforce `scope.yaml` at the shell boundary for network-reaching in-sandbox CLIs (defense-in-depth, mirrors the `call_mcp` check). No-op without a policy or for non-network commands, so upstream behavior is unchanged. | 3 |
 | `strix/agents/prompt.py` | `_resolve_skills` appends `coordination/strix2_domains` for the root agent (+docstring) | Load Strix 2's domain-delegation guidance into the root system prompt. The template already renders every loaded skill via a generic loop, so no template edit is needed; a logged skip if `skills2` isn't registered, so upstream is unchanged. | 3 |
+| `strix/agents/factory.py` | +1 import; `SandboxAgent(model=…)` now `resolve_agent_model(skills, is_root=is_root)` instead of `None` | Per-role model routing (Phase 5). Returns `None` unless `STRIX2_ROUTER` is enabled → the SDK uses the global provider default, so behavior is unchanged by default. | 5 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -322,3 +323,29 @@ principal+policy+region, runtime repro); the sidecar's `notes` points at it and 
 → `add_vulnerability_report` → writer/SARIF — deferred as a deliberate, larger edit to the crux module; the
 sidecar `domain` covers classification additively meanwhile); scope-coupled proof helpers; SARIF emission of
 the framework tags.
+
+## Phase 5 — model router + no-progress guard (started)
+
+Per the codebase map §7, the budget/turn/per-turn guards already exist upstream, so Phase 5 is *enhance*,
+additive and opt-in.
+
+**Per-role model router (`strix/router/`).** Mirrors the `DedupeSettings` precedent (a separate model for a
+sub-task). `RouterSettings` (`STRIX2_ROUTER` to enable, `STRIX2_RECON_MODEL` for the cheap model);
+`role_for_skills` classifies a child as `recon` (cheap) only for clearly recon/enumeration/mapping skills —
+every domain *pentest* skill stays `default` (frontier), a conservative bias that never under-powers
+exploitation; `resolve_agent_model(skills, is_root=…)` returns the routed model, with the **root always on
+the main model**. Wired in `factory.build_strix_agent` (`SandboxAgent(model=resolve_agent_model(...))`);
+returns `None` (⇒ global default) unless enabled, so default behavior is unchanged. This directly attacks the
+9Router cost profile (no prompt caching → recon fan-out on a cheap model saves the most).
+
+**No-progress guard (`strix/guard/`).** `NoProgressDetector` is a pure, in-memory detector for the missing
+*cross-turn* signal: it flags a `repeated_call` (same tool + identical args N× in a row) or a `no_coverage`
+window (a run of calls with no coverage growth). Advisory — the caller nudges then stops. Complements the
+existing per-turn cap and budget/turn ceilings without rebuilding them.
+
+Tests: `tests/test_strix2_router.py` (role classification, selection, resolution, env config, both stall
+signals, reset). CI gate extended to `strix/router` + `strix/guard`.
+
+**Not yet:** wiring `NoProgressDetector` into the turn loop (`core/execution.py`) to actually warn/stop a
+stalled agent, and cross-run recon caching (keyed by target+tool) — both need integration into the run loop
+and are deferred as their own increments.

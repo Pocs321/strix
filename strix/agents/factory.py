@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from strix.agents.prompt import render_system_prompt
 from strix.config import load_settings
+from strix.router import resolve_agent_model
 from strix.scope.enforcement import enforce_shell_command
 from strix.tools.agents_graph.tools import (
     agent_finish,
@@ -734,7 +735,9 @@ def build_strix_agent(
         instructions=instructions,
         tools=tools,
         tool_use_behavior=_finish_tool_use_behavior,
-        model=None,
+        # Strix 2 Phase 5: per-role model routing (opt-in via STRIX2_ROUTER). Returns
+        # None unless enabled → the SDK uses the global provider default, unchanged.
+        model=resolve_agent_model(skills, is_root=is_root),
         capabilities=[
             Filesystem(
                 configure_tools=_make_filesystem_configurator(
