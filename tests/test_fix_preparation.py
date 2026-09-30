@@ -38,11 +38,11 @@ from strix.fix.prepare import (
     PreparationContext,
     PreparationPolicy,
     _network_isolation_prefix,
-    _workspace_digest,
     build_git_manifest,
     build_git_patch,
     prepare_fix,
     run_command,
+    workspace_digest,
 )
 
 
@@ -193,7 +193,7 @@ async def _noop_repair(
         ),
         *context.request.checks,
     ]
-    digest = await _workspace_digest(context.workspace)
+    digest = await workspace_digest(context.workspace)
     results = []
     for command in commands:
         result = record_test_execution(

@@ -315,7 +315,7 @@ async def _tracked_in_index(workspace: Path, path: str) -> bool:
     return await process.wait() == 0
 
 
-async def _workspace_digest(workspace: Path) -> str:
+async def workspace_digest(workspace: Path) -> str:
     manifest, _, _ = await build_git_manifest(workspace)
     payload = json.dumps(
         [entry.model_dump(mode="json") for entry in manifest],
@@ -374,7 +374,11 @@ def _result(
         state=state,
         validation_mode="agent_review",
         prepared_source_digest=(
-            context.feedback[-1].repair.source_digest if context.feedback else None
+            verifier.source_digest
+            if verifier is not None
+            else context.feedback[-1].repair.source_digest
+            if context.feedback
+            else None
         ),
         test_plan=context.feedback[-1].repair.test_plan if context.feedback else None,
         stop_reason=reason,
@@ -475,14 +479,14 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
             record = FixPreparationAttempt(
                 attempt=context.attempt,
                 repair=RepairOutcome(status=RepairStatus.INCOMPLETE, summary="Repair started."),
-                workspace_digest=await _workspace_digest(workspace),
+                workspace_digest=await workspace_digest(workspace),
             )
             context.feedback.append(record)
             record.repair = _repair_outcome(await repair(context, checks))
             repair_turns += max(1, record.repair.turns_used)
             checks = await evidence_reader() if evidence_reader else record.repair.command_results
             record.checks = list(checks)
-            record.workspace_digest = await _workspace_digest(workspace)
+            record.workspace_digest = await workspace_digest(workspace)
             manifest, _, _ = await manifest_builder(workspace)
             if record.repair.status is not RepairStatus.COMPLETE:
                 return await finish(
@@ -518,15 +522,12 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
             if verifier.decision is not VerificationDecision.VERIFIED:
                 return await finish(PreparationState.BLOCKED, verifier.summary, gaps=verifier.gaps)
             # Test selection, failures, reruns and coverage belong to the reviewer.
-            # Only the artifact identity is checked here; it never starts another repair.
-            if (
-                record.workspace_digest != await _workspace_digest(workspace)
-                or verifier.source_digest != record.repair.source_digest
-            ):
+            # Review may correct the patch. Approval binds to its final snapshot,
+            # not the earlier repair checkpoint.
+            if verifier.source_digest != await workspace_digest(workspace):
                 return await finish(
                     PreparationState.BLOCKED,
-                    "The deliverable changed during review; "
-                    "the approved patch cannot be delivered.",
+                    "The deliverable changed after review; the approved patch cannot be delivered.",
                 )
             return await finish(
                 PreparationState.READY,

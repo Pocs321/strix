@@ -668,6 +668,7 @@ def build_strix_agent(
     system_prompt_context: dict[str, Any] | None = None,
     extra_tools: Sequence[Tool] | None = None,
     instructions_override: str | None = None,
+    base_tools: Sequence[Tool] | None = None,
 ) -> SandboxAgent[Any]:
     """Build a SandboxAgent for either root or child use.
 
@@ -680,6 +681,8 @@ def build_strix_agent(
             registered via ``register_agent_tools``.
         instructions_override: Use this verbatim as the system prompt instead
             of rendering the built-in scan prompt.
+        base_tools: Replace the scan toolset (including registered scan extras)
+            for specialized assignments. Filesystem, shell and completion remain available.
     """
     if instructions_override is not None:
         instructions = instructions_override
@@ -694,14 +697,15 @@ def build_strix_agent(
             system_prompt_context=system_prompt_context,
         )
 
-    agent_tools = [*_EXTRA_TOOLS, *(extra_tools or [])]
+    selected_tools = list(_BASE_TOOLS if base_tools is None else base_tools)
+    agent_tools = [*(_EXTRA_TOOLS if base_tools is None else []), *(extra_tools or [])]
     if interactive:
         # Yielding to the user is only meaningful when one is attached.
         agent_tools.append(respond_to_user)
     if is_root:
-        tools: list[Tool] = [*_BASE_TOOLS, *agent_tools, finish_scan]
+        tools: list[Tool] = [*selected_tools, *agent_tools, finish_scan]
     else:
-        tools = [*_BASE_TOOLS, *agent_tools, agent_finish]
+        tools = [*selected_tools, *agent_tools, agent_finish]
     _ensure_unique_tool_names(tools)
     tools = [
         _with_bounded_result(_with_strictness(_with_coerced_arguments(tool), strict_tool_schemas))

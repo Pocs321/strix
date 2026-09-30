@@ -36,6 +36,7 @@ from strix.fix.prepare import (
     build_git_manifest,
     build_git_patch,
     prepare_fix,
+    workspace_digest,
 )
 
 
@@ -73,4 +74,5 @@ __all__ = [
     "build_git_patch",
     "candidate_from_legacy_report",
     "prepare_fix",
+    "workspace_digest",
 ]
