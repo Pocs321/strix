@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import hashlib
 import json
 import logging
-import os
 import subprocess
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -18,8 +16,6 @@ from typing import Literal
 from strix.fix.contracts import (
     BlockerKind,
     CheckResult,
-    CheckStatus,
-    CommandSpec,
     FileManifestEntry,
     FixCandidateV1,
     FixPreparationAttempt,
@@ -32,22 +28,14 @@ from strix.fix.contracts import (
     VerificationDecision,
     VerifierResult,
 )
-from strix.fix.evidence import command_status
 
 
 class PreparationCancelledError(RuntimeError):
     pass
 
 
-CommandRunner = Callable[[Path, CommandSpec], Awaitable[CheckResult]]
 ManifestBuilder = Callable[[Path], Awaitable[tuple[list[FileManifestEntry], str, str | None]]]
 CancellationCheck = Callable[[], bool]
-
-
-@dataclass(slots=True)
-class PreparationPolicy:
-    timeout_seconds: int = 7200
-    max_output_chars: int = 20000
 
 
 @dataclass(slots=True)
@@ -61,7 +49,7 @@ class PreparationContext:
 
 RepairAgent = Callable[
     [PreparationContext, list[CheckResult]],
-    Awaitable[RepairOutcome | None],
+    Awaitable[RepairOutcome],
 ]
 IndependentVerifier = Callable[
     [PreparationContext, list[CheckResult]],
@@ -69,127 +57,6 @@ IndependentVerifier = Callable[
 ]
 SourceVerifier = Callable[[PreparationContext], Awaitable[bool]]
 EvidenceReader = Callable[[], Awaitable[list[CheckResult]]]
-
-
-_COMMAND_ENV_ALLOWLIST = frozenset(
-    {
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "PATH",
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "VIRTUAL_ENV",
-        "SystemRoot",
-    }
-)
-
-
-@functools.lru_cache(maxsize=1)
-def _network_isolation_prefix() -> tuple[str, ...] | None:
-    """Return a working ``unshare`` prefix that creates an empty network
-    namespace, or None when the platform cannot isolate egress."""
-    for prefix in (("unshare", "-Urn"), ("unshare", "-n")):
-        try:
-            probe = subprocess.run(  # noqa: S603
-                [*prefix, "true"],
-                capture_output=True,
-                timeout=15,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if probe.returncode == 0:
-            return prefix
-    return None
-
-
-def _command_environment(credentials_allowed: Iterable[str]) -> dict[str, str]:
-    allowed = _COMMAND_ENV_ALLOWLIST | set(credentials_allowed)
-    env = {key: value for key, value in os.environ.items() if key in allowed}
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return env
-
-
-async def run_command(
-    workspace: Path,
-    command: CommandSpec,
-    *,
-    credentials_allowed: Iterable[str] = (),
-    network_allowed: bool = False,
-) -> CheckResult:
-    started = time.monotonic()
-    cwd = (workspace / command.cwd).resolve()
-    if not cwd.is_relative_to(workspace.resolve()) or not cwd.is_dir():
-        return CheckResult(
-            name=command.name,
-            argv=command.argv,
-            status=CheckStatus.UNAVAILABLE,
-            duration_seconds=time.monotonic() - started,
-            output="The command working directory is unavailable.",
-            required=command.required,
-        )
-    argv = list(command.argv)
-    if not network_allowed:
-        prefix = _network_isolation_prefix()
-        if prefix is None:
-            return CheckResult(
-                name=command.name,
-                argv=command.argv,
-                status=CheckStatus.UNAVAILABLE,
-                duration_seconds=time.monotonic() - started,
-                output="Network isolation is unavailable, so the command was not run.",
-                required=command.required,
-            )
-        argv = [*prefix, *argv]
-    process: asyncio.subprocess.Process | None = None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=cwd,
-            env=_command_environment(credentials_allowed),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        output, _ = await asyncio.wait_for(process.communicate(), command.timeout_seconds)
-    except (FileNotFoundError, PermissionError) as exc:
-        return CheckResult(
-            name=command.name,
-            argv=command.argv,
-            status=CheckStatus.UNAVAILABLE,
-            duration_seconds=time.monotonic() - started,
-            output=str(exc),
-            required=command.required,
-        )
-    except TimeoutError:
-        if process is not None:
-            process.kill()
-            await process.wait()
-        return CheckResult(
-            name=command.name,
-            argv=command.argv,
-            status=CheckStatus.FAILED,
-            duration_seconds=time.monotonic() - started,
-            output=f"Timed out after {command.timeout_seconds} seconds.",
-            required=command.required,
-        )
-    status, failure_kind = command_status(process.returncode or 0, output.decode(errors="replace"))
-    return CheckResult(
-        name=command.name,
-        argv=command.argv,
-        status=status,
-        exit_code=process.returncode,
-        duration_seconds=time.monotonic() - started,
-        output=output.decode(errors="replace")[-20000:],
-        required=command.required,
-        failure_kind=failure_kind,
-        cwd=command.cwd,
-        workspace_root=str(workspace.resolve()),
-    )
 
 
 async def build_git_manifest(
@@ -361,7 +228,6 @@ def _result(
     reason: str,
     started: float,
     checks: list[CheckResult] | None = None,
-    reproduction: CheckResult | None = None,
     verifier: VerifierResult | None = None,
     gaps: list[str] | None = None,
     manifest: list[FileManifestEntry] | None = None,
@@ -380,7 +246,6 @@ def _result(
             if context.feedback
             else None
         ),
-        test_plan=context.feedback[-1].repair.test_plan if context.feedback else None,
         stop_reason=reason,
         source_identity=context.candidate.source_identity,
         candidate=context.candidate,
@@ -390,22 +255,12 @@ def _result(
         changed_files=[entry.path for entry in manifest or []],
         diff_summary=diff_summary,
         checks=checks or [],
-        security_reproduction=reproduction,
         verifier=verifier,
         attempt_history=attempt_history or [],
         gaps=gaps or [],
         blocker=blocker,
         attempts=context.attempt,
         elapsed_seconds=time.monotonic() - started,
-    )
-
-
-def _repair_outcome(value: RepairOutcome | None) -> RepairOutcome:
-    if value is not None:
-        return value
-    return RepairOutcome(
-        status=RepairStatus.COMPLETE,
-        summary="The repair implementation returned control for independent evaluation.",
     )
 
 
@@ -419,11 +274,9 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
     source_verifier: SourceVerifier = _verify_source,
     evidence_reader: EvidenceReader | None = None,
     cancelled: CancellationCheck = lambda: False,
-    policy: PreparationPolicy | None = None,
 ) -> FixPreparationResultV1:
     """Run repair/review conversations; agents own setup, tests and corrections."""
     started = time.monotonic()
-    resolved_policy = policy or PreparationPolicy(timeout_seconds=request.timeout_seconds)
     context = PreparationContext(request=request, workspace=workspace, candidate=request.candidate)
     checks: list[CheckResult] = []
     verifier: VerifierResult | None = None
@@ -453,7 +306,6 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
             attempt_history=context.feedback,
             blocker=blocker,
             gaps=gaps,
-            reproduction=next((c for c in checks if c.purpose == "regression"), None),
         )
 
     async def execute() -> FixPreparationResultV1:  # noqa: PLR0911 - explicit terminal outcomes
@@ -482,7 +334,7 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
                 workspace_digest=await workspace_digest(workspace),
             )
             context.feedback.append(record)
-            record.repair = _repair_outcome(await repair(context, checks))
+            record.repair = await repair(context, checks)
             repair_turns += max(1, record.repair.turns_used)
             checks = await evidence_reader() if evidence_reader else record.repair.command_results
             record.checks = list(checks)
@@ -539,7 +391,7 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
         )
 
     try:
-        async with asyncio.timeout(resolved_policy.timeout_seconds):
+        async with asyncio.timeout(request.timeout_seconds):
             return await execute()
     except PreparationCancelledError:
         return await finish(PreparationState.FAILED, "Fix preparation was cancelled.")

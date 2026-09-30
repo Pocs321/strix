@@ -21,61 +21,27 @@ from strix.fix.contracts import (
     FixEdit,
     FixPreparationRequestV1,
     PreparationState,
-    RegressionTestResult,
     RepairOutcome,
     RepairStatus,
     ReproductionSpec,
     SourceIdentity,
     SourceIdentityKind,
     VerificationDecision,
-    VerificationTarget,
     VerifierResult,
     candidate_from_legacy_report,
 )
-from strix.fix.evidence import command_status, passed_test_count, record_test_execution
 from strix.fix.locations import AnchorStatus, anchor_location
 from strix.fix.prepare import (
     PreparationContext,
-    PreparationPolicy,
-    _network_isolation_prefix,
     build_git_manifest,
     build_git_patch,
     prepare_fix,
-    run_command,
     workspace_digest,
 )
 
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _regression() -> RegressionTestResult:
-    base = CheckResult(
-        name="authorization",
-        argv=["python", "regression.py"],
-        status=CheckStatus.FAILED,
-        exit_code=1,
-        duration_seconds=0,
-        target=VerificationTarget.BASE,
-        output="unauthorized access allowed",
-    )
-    passed = base.model_copy(
-        update={
-            "status": CheckStatus.PASSED,
-            "exit_code": 0,
-            "target": VerificationTarget.PATCHED,
-            "output": "passed",
-        }
-    )
-    return RegressionTestResult(
-        name="authorization",
-        expected_base_failure="unauthorized access allowed",
-        harness_sha256="a" * 64,
-        base=base,
-        patched=passed,
-        behavior=passed,
-    )
 
 
 def _git(workspace: Path, *args: str) -> str:
@@ -194,14 +160,7 @@ async def _noop_repair(
         *context.request.checks,
     ]
     digest = await workspace_digest(context.workspace)
-    results = []
-    for command in commands:
-        result = record_test_execution(
-            await run_command(context.workspace, command, network_allowed=True), command
-        )
-        results.append(
-            result.model_copy(update={"source_digest": digest, "environment_id": "test"})
-        )
+    results = [await _fixture_command(context.workspace, command) for command in commands]
     return RepairOutcome(
         status=RepairStatus.COMPLETE,
         summary="Fixed and tested.",
@@ -211,33 +170,36 @@ async def _noop_repair(
     )
 
 
+async def _fixture_command(workspace: Path, command: CommandSpec) -> CheckResult:
+    """Run this module's synthetic fixture tests, without a production command wrapper."""
+    process = await asyncio.create_subprocess_exec(
+        command.argv[0],
+        "-B",
+        *command.argv[1:],
+        cwd=workspace,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await process.communicate()
+    return CheckResult(
+        name=command.name,
+        argv=command.argv,
+        status=CheckStatus.PASSED if process.returncode == 0 else CheckStatus.FAILED,
+        exit_code=process.returncode,
+        duration_seconds=0,
+        output=output.decode(),
+    )
+
+
 async def _verified(
-    _context: PreparationContext,
+    context: PreparationContext,
     _checks: list[CheckResult],
 ) -> VerifierResult:
     return VerifierResult(
         decision=VerificationDecision.VERIFIED,
-        source_digest=_context.feedback[-1].repair.source_digest,
-        summary="The invariant is closed.",
-        security_invariant_closed=True,
+        source_digest=context.feedback[-1].repair.source_digest,
+        summary="The fix addresses the finding.",
         review_basis="code_review",
-        regression_test_valid=True,
-        unit_test_coverage_valid=True,
-        reproduction_executed=False,
-        reproduction_summary="The vulnerable input is rejected.",
-        sibling_paths_reviewed=["app.py"],
-        preserved_behaviors=["The module compiles."],
-        regression_tests=[_regression()],
-        security_tests=[
-            CheckResult(
-                name="security reproduction",
-                argv=[sys.executable, "-c", "assert True"],
-                status=CheckStatus.PASSED,
-                exit_code=0,
-                duration_seconds=0,
-                target=VerificationTarget.PATCHED,
-            )
-        ],
     )
 
 
@@ -370,58 +332,6 @@ async def test_build_git_manifest_lists_files_inside_new_directory(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_run_command_drops_ambient_credentials(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("STRIX_AMBIENT_TOKEN", "hunter2")
-    command = CommandSpec(
-        name="env probe",
-        argv=[
-            sys.executable,
-            "-c",
-            "import os; print(os.environ.get('STRIX_AMBIENT_TOKEN', '<absent>'))",
-        ],
-    )
-
-    sealed = await run_command(tmp_path, command, network_allowed=True)
-    assert sealed.status is CheckStatus.PASSED
-    assert "<absent>" in sealed.output
-
-    granted = await run_command(
-        tmp_path,
-        command,
-        credentials_allowed=["STRIX_AMBIENT_TOKEN"],
-        network_allowed=True,
-    )
-    assert granted.status is CheckStatus.PASSED
-    assert "hunter2" in granted.output
-
-
-@pytest.mark.asyncio
-async def test_run_command_blocks_egress_when_network_not_allowed(tmp_path: Path) -> None:
-    command = CommandSpec(
-        name="egress probe",
-        argv=[
-            sys.executable,
-            "-c",
-            (
-                "import socket, sys; s = socket.socket(); s.settimeout(3); "
-                "sys.exit(0 if s.connect_ex(('1.1.1.1', 53)) == 0 else 1)"
-            ),
-        ],
-    )
-
-    result = await run_command(tmp_path, command)
-
-    if _network_isolation_prefix() is None:
-        assert result.status is CheckStatus.UNAVAILABLE
-        assert "not run" in result.output
-    else:
-        assert result.status is CheckStatus.FAILED
-
-
-@pytest.mark.asyncio
 async def test_manifest_patch_includes_untracked_companion_file(tmp_path: Path) -> None:
     workspace, _ = _workspace(tmp_path)
     (workspace / "companion.py").write_text("guard = True\n")
@@ -430,18 +340,6 @@ async def test_manifest_patch_includes_untracked_companion_file(tmp_path: Path) 
     assert b"b/companion.py" in patch
     assert b"+guard = True" in patch
     _git(workspace, "diff", "--check")
-
-
-def test_skipped_check_and_missing_runtime_are_not_passing_evidence() -> None:
-    assert command_status(0, "Skipping to avoid parser lock")[0] is CheckStatus.SKIPPED
-    assert command_status(127, "bun: command not found")[0] is CheckStatus.UNAVAILABLE
-    assert (
-        not _regression()
-        .model_copy(
-            update={"base": _regression().base.model_copy(update={"failure_kind": "environment"})}
-        )
-        .passed()
-    )
 
 
 def test_candidate_keeps_full_finding_without_inventing_reproduction() -> None:
@@ -466,31 +364,6 @@ def test_candidate_keeps_full_finding_without_inventing_reproduction() -> None:
     assert candidate.reproduction is None
 
 
-def test_ambiguous_imports_and_syntax_never_authorize_environment_recovery() -> None:
-    for output in [
-        "Cannot find module '/tmp/test/skills/policy.js'",
-        "No module named 'wrong_repo_path'",
-        "SyntaxError: invalid syntax",
-    ]:
-        status, kind = command_status(1, output)
-        assert status is CheckStatus.FAILED
-        assert kind == "unknown"
-    assert command_status(127, "bun: command not found") == (CheckStatus.UNAVAILABLE, "environment")
-
-
-def test_regression_requires_consistent_execution_provenance() -> None:
-    regression = _regression()
-    for leg in (regression.base, regression.patched, regression.behavior):
-        leg.source_digest = "a" * 64
-        leg.environment_id = "execution:0"
-    assert regression.passed()
-    regression.base.environment_id = "execution:1"
-    assert not regression.passed()
-    regression.base.environment_id = "execution:0"
-    regression.behavior = regression.behavior.model_copy(update={"source_digest": "b" * 64})
-    assert not regression.passed()
-
-
 @pytest.mark.asyncio
 async def test_agent_tests_are_reused_without_controller_execution(tmp_path: Path) -> None:
     workspace, commit = _workspace(tmp_path)
@@ -506,9 +379,8 @@ async def test_agent_tests_are_reused_without_controller_execution(tmp_path: Pat
     )
     assert result.state is PreparationState.READY
     assert result.validation_mode == "agent_review"
-    assert result.test_plan is None
     assert result.checks == outcome.command_results
-    assert result.checks[0].tests_passed == 1
+    assert "Ran 1 test" in result.checks[0].output
     assert result.prepared_source_digest == result.verifier.source_digest
 
 
@@ -534,7 +406,7 @@ async def test_review_can_request_more_than_two_repairs(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("defect", ["missing_unit", "failed", "empty", "stale", "missing_request"])
+@pytest.mark.parametrize("defect", ["missing_unit", "failed", "missing_request"])
 async def test_agent_approval_owns_test_evidence_without_controller_retries(
     tmp_path: Path, defect: str
 ) -> None:
@@ -543,17 +415,14 @@ async def test_agent_approval_owns_test_evidence_without_controller_retries(
     async def repair(context, checks):
         result = await _noop_repair(context, checks)
         if defect == "missing_unit":
-            result.command_results = [c for c in result.command_results if c.purpose != "unit"]
+            result.command_results = [
+                c for c in result.command_results if c.name != "existing suite"
+            ]
         elif defect == "missing_request":
-            result.command_results = [c for c in result.command_results if c.purpose != "quality"]
+            result.command_results = [c for c in result.command_results if c.name != "compile"]
         else:
             check = result.command_results[0]
-            if defect == "failed":
-                check.status, check.exit_code = CheckStatus.FAILED, 1
-            elif defect == "empty":
-                check.tests_passed = 0
-            else:
-                check.source_digest = "a" * 64
+            check.status, check.exit_code = CheckStatus.FAILED, 1
         return result
 
     request = _request(_candidate(commit))
@@ -581,12 +450,7 @@ async def test_incomplete_validation_can_be_finished_by_reviewer(tmp_path: Path)
     async def review(context, checks):
         assert checks[1].status is CheckStatus.FAILED
         command = CommandSpec(name="existing suite", argv=checks[1].argv, purpose="unit")
-        executed = record_test_execution(
-            await run_command(workspace, command, network_allowed=True), command
-        )
-        evidence[1] = executed.model_copy(
-            update={"source_digest": evidence[0].source_digest, "environment_id": "test"}
-        )
+        evidence[1] = await _fixture_command(workspace, command)
         return await _verified(context, checks)
 
     async def read_evidence():
@@ -631,12 +495,13 @@ async def test_interruptions_preserve_partial_patch_without_approval(
         raise AssertionError("Stopped repair must not be approved")
 
     result = await prepare_fix(
-        _request(_candidate(commit)),
+        _request(_candidate(commit)).model_copy(
+            update={"timeout_seconds": 1 if stop == "timeout" else 30}
+        ),
         workspace,
         repair=repair,
         verify=review,
         cancelled=lambda: cancel,
-        policy=PreparationPolicy(timeout_seconds=1 if stop == "timeout" else 30),
     )
     assert result.state in {PreparationState.BLOCKED, PreparationState.FAILED}
     assert result.final_file_manifest
@@ -686,24 +551,6 @@ async def test_empty_deliverable_does_not_start_another_repair(tmp_path: Path) -
     assert "without a deliverable patch" in result.stop_reason
 
 
-@pytest.mark.parametrize(
-    ("output", "expected"),
-    [
-        ("Tests: 2 passed, 2 total", 2),
-        ("2 pass\n0 fail", 2),
-        ("# tests 2\n# pass 2\n# fail 0", 2),
-        ("Ran 3 tests in 0.1s\n\nOK (skipped=1)", 2),
-        ("3 examples, 0 failures, 1 pending", 2),
-        ("--- PASS: TestSafe (0.00s)", 1),
-        ("Ran 2 tests in 0.1s\n\nOK (skipped=2)", 0),
-        ("No tests found", None),
-    ],
-)
-def test_runner_summaries_record_actual_execution(output: str, expected: int | None) -> None:
-
-    assert passed_test_count(output) == expected
-
-
 def test_new_command_metadata_does_not_change_existing_finding_digest(tmp_path: Path) -> None:
 
     _root, commit = _workspace(tmp_path)
@@ -715,21 +562,3 @@ def test_new_command_metadata_does_not_change_existing_finding_digest(tmp_path: 
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     assert candidate.digest() == previous
-
-
-def test_unknown_runner_format_preserves_exit_result_for_independent_review() -> None:
-
-    command = CommandSpec(name="custom runner", argv=["./tests/run"], purpose="unit")
-    result = record_test_execution(
-        CheckResult(
-            name=command.name,
-            argv=command.argv,
-            status=CheckStatus.PASSED,
-            exit_code=0,
-            duration_seconds=1,
-            output="All project assertions completed successfully.",
-        ),
-        command,
-    )
-    assert result.status is CheckStatus.PASSED
-    assert result.tests_passed is None

@@ -42,11 +42,6 @@ class CheckStatus(StrEnum):
     SKIPPED = "skipped"
 
 
-class VerificationTarget(StrEnum):
-    BASE = "base"
-    PATCHED = "patched"
-
-
 class VerificationDecision(StrEnum):
     VERIFIED = "verified"
     REJECTED = "rejected"
@@ -152,28 +147,6 @@ class ReproductionSpec(ContractModel):
     command: CommandSpec | None = None
 
 
-class RepositoryTestPlan(ContractModel):
-    """Historical native-test handoff; agent-driven runs record commands directly."""
-
-    regression_test: CommandSpec
-    regression_files: list[str] = Field(min_length=1)
-    unit_tests: list[CommandSpec] = []
-    no_unit_tests_reason: str | None = None
-
-    @field_validator("regression_files")
-    @classmethod
-    def validate_files(cls, paths: list[str]) -> list[str]:
-        return list(dict.fromkeys(_validate_relative_path(path) for path in paths))
-
-    @model_validator(mode="after")
-    def explain_missing_suite(self) -> RepositoryTestPlan:
-        if not self.unit_tests and not (self.no_unit_tests_reason or "").strip():
-            raise ValueError(
-                "Provide the existing unit-test commands or explain why no suite exists."
-            )
-        return self
-
-
 class ReportedCheck(ContractModel):
     name: str
     result: str
@@ -230,6 +203,8 @@ class FixPreparationRequestV1(ContractModel):
 
 
 class CheckResult(ContractModel):
+    """Recorded native shell execution; the reviewer interprets its meaning."""
+
     name: str
     argv: list[str]
     status: CheckStatus
@@ -237,90 +212,17 @@ class CheckResult(ContractModel):
     duration_seconds: float = Field(ge=0)
     output: str = ""
     required: bool = True
-    target: VerificationTarget | None = None
-    baseline_status: CheckStatus | None = None
-    baseline_output: str | None = None
     cwd: str = "."
-    baseline_exit_code: int | None = None
-    failure_kind: (
-        Literal["environment", "timeout", "check", "source_changed", "harness", "unknown"] | None
-    ) = None
     workspace_root: str | None = None
-    baseline_workspace_root: str | None = None
-    source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     environment_id: str | None = None
-    purpose: Literal["quality", "regression", "unit", "security"] = "quality"
-    tests_passed: int | None = Field(default=None, ge=0)
-
-
-class RegressionTestResult(ContractModel):
-    """One unchanged test run on both revisions, plus a legitimate-operation check."""
-
-    name: str
-    expected_base_failure: str = Field(min_length=1)
-    harness_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    base: CheckResult
-    patched: CheckResult
-    behavior: CheckResult
-
-    def passed(self) -> bool:
-        results = (self.base, self.patched, self.behavior)
-        # Legacy records remain readable. Once provenance is supplied, every leg
-        # must have it and the environment must be unchanged across the pair.
-        if any(item.source_digest or item.environment_id for item in results) and (
-            not all(item.source_digest and item.environment_id for item in results)
-            or len({item.environment_id for item in results}) != 1
-            or self.patched.source_digest != self.behavior.source_digest
-        ):
-            return False
-        return (
-            self.base.target is VerificationTarget.BASE
-            and self.patched.target is VerificationTarget.PATCHED
-            and self.behavior.target is VerificationTarget.PATCHED
-            and self.base.argv == self.patched.argv
-            and self.base.cwd == self.patched.cwd
-            and self.base.status is CheckStatus.FAILED
-            and self.base.exit_code == 1
-            and self.base.failure_kind in {None, "check"}
-            and self.expected_base_failure in self.base.output
-            and self.patched.status is CheckStatus.PASSED
-            and self.patched.exit_code == 0
-            and self.behavior.status is CheckStatus.PASSED
-            and self.behavior.exit_code == 0
-        )
-
-
-class VerificationHarness(ContractModel):
-    path: str
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    content: str
-
-
-class ReviewConcern(ContractModel):
-    kind: Literal["repair_needed", "customer_prerequisite", "optional_follow_up"]
-    summary: str = Field(min_length=1)
 
 
 class VerifierResult(ContractModel):
     decision: VerificationDecision
     summary: str
-    security_invariant_closed: bool = False
-    reproduction_executed: bool = False
-    reproduction_summary: str | None = None
-    sibling_paths_reviewed: list[str] = []
-    preserved_behaviors: list[str] = []
     gaps: list[str] = []
-    security_tests: list[CheckResult] = []
-    repairable: bool = False
     blocker: PreparationBlocker | None = None
-    regression_tests: list[RegressionTestResult] = []
-    harnesses: list[VerificationHarness] = []
-    notes: list[str] = []
     review_basis: Literal["execution", "code_review"] | None = None
-    regression_test_valid: bool = False
-    unit_test_coverage_valid: bool = False
-    # None preserves historical reviews; new reviewers classify every concern.
-    concerns: list[ReviewConcern] | None = None
     source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     turns_used: int = Field(default=0, ge=0)
 
@@ -329,12 +231,9 @@ class RepairOutcome(ContractModel):
     status: RepairStatus
     summary: str = Field(min_length=1)
     gaps: list[str] = []
-    reproduction_command: CommandSpec | None = None
     turns_used: int = Field(default=0, ge=0)
     blocker: PreparationBlocker | None = None
-    checks: list[CommandSpec] = []
     command_results: list[CheckResult] = []
-    test_plan: RepositoryTestPlan | None = None
     source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
@@ -342,7 +241,6 @@ class FixPreparationAttempt(ContractModel):
     attempt: int = Field(ge=1)
     repair: RepairOutcome
     checks: list[CheckResult] = []
-    security_reproduction: CheckResult | None = None
     verifier: VerifierResult | None = None
     workspace_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -359,8 +257,7 @@ class FileManifestEntry(ContractModel):
 
 class FixPreparationResultV1(ContractModel):
     version: Literal["1"] = "1"
-    # Absent on historical records; keep their stronger, paired-proof interpretation.
-    validation_mode: Literal["paired", "native_tests", "agent_review"] = "paired"
+    validation_mode: Literal["agent_review"] = "agent_review"
     prepared_source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     state: PreparationState
     stop_reason: str
@@ -372,16 +269,13 @@ class FixPreparationResultV1(ContractModel):
     changed_files: list[str] = []
     diff_summary: str = ""
     checks: list[CheckResult] = []
-    security_reproduction: CheckResult | None = None
     verifier: VerifierResult | None = None
     attempt_history: list[FixPreparationAttempt] = []
     gaps: list[str] = []
     blocker: PreparationBlocker | None = None
-    setup_checks: list[CheckResult] = []
     attempts: int = Field(default=0, ge=0)
     elapsed_seconds: float = Field(default=0, ge=0)
     cost_usd: float | None = Field(default=None, ge=0)
-    test_plan: RepositoryTestPlan | None = None
 
 
 def candidate_from_legacy_report(
