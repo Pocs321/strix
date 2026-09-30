@@ -17,6 +17,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | File | Change | Reason | Phase |
 |---|---|---|---|
 | `strix/core/runner.py` | +1 import, +1 call to `install_strix2_extensions(run_dir)` after `set_scan_id` in `run_strix_scan` | Single, idempotent hook to register Strix 2's additive tools/stores at run start via the built-in `register_agent_tools` seam (which had no upstream callers). 2 lines added, none changed. | 4 |
+| `strix/core/runner.py` | Command-line MCP path wraps `load_user_mcp_configs()` in `configs_with_builtins(...)` (+1 lazy import) | Auto-attach Strix 2's applicable host-side wrappers (the AWS wrapper when the scope authorizes an AWS account) so the agent reaches them without hand-editing `~/.strix/mcp-servers.json`. No-op when nothing applies; user configs win name collisions; only the command-line branch (not the SaaS `mcp_connection_requests` path). | 1 |
 | `strix/report/writer.py` | +2 imports, `write_executive_report` appends a best-effort "Leads (unvalidated)" section via new `_strix2_leads_section()` | Surface candidate leads in the report `strix view` renders. Guarded/no-op when the candidate store is absent or empty, so upstream-only runs are unchanged. | 4 |
 | `strix/tools/mcp/agent_tools.py` | +1 import, `call_mcp` calls new `_scope_denial(arguments)` before dispatch | Enforce `scope.yaml` at the MCP boundary the brief names. No-op when no policy is loaded / no high-confidence target found, so upstream MCP behavior is unchanged. | 1 |
 | `strix/interface/cli_args.py` | Added `--scope-config` and `--allow-intrusive` flags → set `STRIX_SCOPE_CONFIG` / `STRIX_ALLOW_INTRUSIVE` env (mirrors the existing `--mcp-*` pattern) | Let the operator point at a scope file and gate intrusive actions from the CLI. | 1 |
@@ -148,9 +149,18 @@ public-bucket signal → candidate; bounded read → validated evidence.
 
 **Registration model.** `strix/mcp_servers/registry.py::aws_wrapper_config()` emits the
 `McpConnectionConfig` (a `stdio` entry: `<python> -m strix.mcp_servers.aws`, tight `allowed_tools`,
-forwards `STRIX_SCOPE_CONFIG`/`STRIX_ALLOW_INTRUSIVE` to the subprocess). For now an operator registers it
-in `~/.strix/mcp-servers.json` (or `--mcp-config`); `builtin_wrapper_configs()` is the list a future
-auto-wire hook would attach at run start. CI blocking gate extended to lint+typecheck `strix/mcp_servers`.
+forwards `STRIX_SCOPE_CONFIG`/`STRIX_ALLOW_INTRUSIVE` to the subprocess). An operator can still register it
+by hand in `~/.strix/mcp-servers.json` (or `--mcp-config`). CI blocking gate extended to lint+typecheck
+`strix/mcp_servers`.
+
+**Auto-wire (done).** The command-line run path now attaches the applicable built-in wrappers automatically
+via `configs_with_builtins(load_user_mcp_configs())` (one small, logged edit in `core/runner.py`).
+`applicable_builtin_configs` is deliberately conservative: the AWS wrapper is attached **only when the
+active scope authorizes an AWS account** (`cloud.aws_account_ids` non-empty) — so a pure web run never
+spawns a cloud subprocess — never when the user already configured a `strix-aws` connection (theirs wins),
+and never when `STRIX2_AUTO_WRAPPERS` is falsey. Scope is loaded first (`install_strix2_extensions` at
+`runner.py:231`) so the policy is available when requests are built. The SaaS/pro path
+(`mcp_connection_requests`) is untouched. Tests in `tests/test_strix2_mcp_aws.py`.
 
 **Known verification gap.** The wrapper's *live* behavior (real subprocess spawn + MCP connect + real AWS)
 is not covered by an automated test — it needs AWS creds and a lab account. Unit tests cover scope gating,

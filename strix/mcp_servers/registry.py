@@ -20,6 +20,7 @@ import os
 import sys
 
 from strix.mcp_servers import aws
+from strix.scope.enforcement import get_active_policy
 from strix.tools.mcp.config import McpConnectionConfig
 
 
@@ -27,6 +28,9 @@ from strix.tools.mcp.config import McpConnectionConfig
 # it resolves and enforces the same authorized scope. Credentials are NOT listed
 # here: boto3 picks those up from the inherited host environment / shared config.
 _SCOPE_ENV_PASSTHROUGH = ("STRIX_SCOPE_CONFIG", "STRIX_ALLOW_INTRUSIVE")
+
+# Set to a falsey value to stop Strix auto-attaching the built-in wrappers to a run.
+_AUTO_WRAPPERS_ENV = "STRIX2_AUTO_WRAPPERS"
 
 
 def _passthrough_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -75,3 +79,49 @@ def aws_wrapper_config(
 def builtin_wrapper_configs() -> list[McpConnectionConfig]:
     """Return every host-side wrapper Strix 2 ships (currently the AWS wrapper)."""
     return [aws_wrapper_config()]
+
+
+def _auto_wrappers_enabled() -> bool:
+    return os.environ.get(_AUTO_WRAPPERS_ENV, "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _aws_in_scope() -> bool:
+    """Whether the active scope authorizes at least one AWS account."""
+    policy = get_active_policy()
+    return bool(policy and policy.cloud.aws_account_ids)
+
+
+def applicable_builtin_configs(existing_names: set[str]) -> list[McpConnectionConfig]:
+    """The built-in wrappers to auto-attach to this run.
+
+    Context-aware and conservative: a wrapper is attached only when the engagement
+    actually needs it (the AWS wrapper only when the active scope authorizes an AWS
+    account, so a pure web run never spawns a cloud subprocess), never when the user
+    already configured a connection of that name (their entry wins), and never when
+    ``STRIX2_AUTO_WRAPPERS`` is set to a falsey value. Scope must be loaded first
+    (``install_strix2_extensions`` does this before the run builds MCP requests).
+    """
+    if not _auto_wrappers_enabled():
+        return []
+    configs: list[McpConnectionConfig] = []
+    if "strix-aws" not in existing_names and _aws_in_scope():
+        configs.append(aws_wrapper_config())
+    return configs
+
+
+def configs_with_builtins(
+    user_configs: list[McpConnectionConfig],
+) -> list[McpConnectionConfig]:
+    """Append the applicable built-in wrappers to the user's MCP configs.
+
+    The user's own configs come first and win name collisions (mirroring the
+    loader's first-wins de-dup). Used on the command-line run path so the agent can
+    reach the built-in wrappers without hand-editing ``~/.strix/mcp-servers.json``.
+    """
+    existing = {config.name for config in user_configs}
+    return [*user_configs, *applicable_builtin_configs(existing)]

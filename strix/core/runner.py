@@ -389,6 +389,7 @@ async def run_strix_scan(
         # list_mcps / describe_mcp / call_mcp tools, guided by brief static prompt
         # guidance when any connection exists. Fail-open: a missing config, or a
         # server that will not connect, must never break a run.
+        from strix.mcp_servers.registry import configs_with_builtins
         from strix.tools.mcp import (
             McpConnectionRequest,
             McpRegistry,
@@ -398,11 +399,14 @@ async def run_strix_scan(
         mcp_registry = McpRegistry()
         try:
             if mcp_connection_requests is None:
-                # Command-line default: read the user's file and wrap each config
-                # in a bare request (no provider or transform), so this path is
-                # exactly the old behavior.
+                # Command-line default: the user's file plus Strix 2's applicable
+                # built-in wrappers (e.g. the AWS wrapper when the scope authorizes an
+                # AWS account), each wrapped in a bare request. Lets the agent reach the
+                # built-in wrappers without hand-editing ~/.strix/mcp-servers.json;
+                # upstream behavior is unchanged when no wrapper applies.
                 mcp_requests = [
-                    McpConnectionRequest(config=config) for config in load_user_mcp_configs()
+                    McpConnectionRequest(config=config)
+                    for config in configs_with_builtins(load_user_mcp_configs())
                 ]
             else:
                 mcp_requests = mcp_connection_requests

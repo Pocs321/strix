@@ -17,9 +17,15 @@ from botocore.exceptions import ClientError
 
 from strix.mcp_servers import aws
 from strix.mcp_servers.base import ScopeGuard
-from strix.mcp_servers.registry import aws_wrapper_config, builtin_wrapper_configs
+from strix.mcp_servers.registry import (
+    applicable_builtin_configs,
+    aws_wrapper_config,
+    builtin_wrapper_configs,
+    configs_with_builtins,
+)
 from strix.scope.enforcement import get_active_policy, set_active_policy
 from strix.scope.schema import ScopePolicy
+from strix.tools.mcp.config import McpConnectionConfig
 
 
 if TYPE_CHECKING:
@@ -243,3 +249,44 @@ def test_config_forwards_scope_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_builtin_wrapper_configs() -> None:
     configs = builtin_wrapper_configs()
     assert [c.name for c in configs] == ["strix-aws"]
+
+
+# --- auto-wire (applicable_builtin_configs / configs_with_builtins) -----------
+
+def test_applicable_builtins_attaches_aws_when_in_scope() -> None:
+    set_active_policy(_policy())  # has cloud.aws_account_ids
+    configs = applicable_builtin_configs(set())
+    assert [c.name for c in configs] == ["strix-aws"]
+
+
+def test_applicable_builtins_empty_without_aws_scope() -> None:
+    set_active_policy(ScopePolicy.model_validate({"web": {"domains": ["example.com"]}}))
+    assert applicable_builtin_configs(set()) == []
+
+
+def test_applicable_builtins_empty_without_policy() -> None:
+    set_active_policy(None)
+    assert applicable_builtin_configs(set()) == []
+
+
+def test_applicable_builtins_skips_user_configured_name() -> None:
+    set_active_policy(_policy())
+    assert applicable_builtin_configs({"strix-aws"}) == []
+
+
+def test_auto_wrappers_env_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX2_AUTO_WRAPPERS", "0")
+    set_active_policy(_policy())
+    assert applicable_builtin_configs(set()) == []
+
+
+def test_configs_with_builtins_appends_and_user_wins() -> None:
+    set_active_policy(_policy())
+    user = [McpConnectionConfig(name="github", transport="stdio", command="x")]
+    assert [c.name for c in configs_with_builtins(user)] == ["github", "strix-aws"]
+
+    # A user's own strix-aws entry wins: no duplicate is appended.
+    mine = [McpConnectionConfig(name="strix-aws", transport="stdio", command="mine")]
+    merged = configs_with_builtins(mine)
+    assert [c.name for c in merged] == ["strix-aws"]
+    assert merged[0].command == "mine"
