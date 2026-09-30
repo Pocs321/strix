@@ -49,6 +49,24 @@ def test_api_base_url_prefix_match() -> None:
     assert not p.evaluate("https://api.example.com/v2/admin").allowed
 
 
+def test_api_base_url_requires_path_boundary() -> None:
+    # Regression (surfaced by dogfooding the baseline scan): a plain startswith let
+    # the authorized prefix ".../v1" also match ".../v1extra". The match must break
+    # on a path/query/fragment boundary.
+    p = _policy()  # api.base_urls = ["https://api.example.com/v1"]
+    assert p.evaluate("https://api.example.com/v1").allowed
+    assert p.evaluate("https://api.example.com/v1/users/1").allowed
+    assert p.evaluate("https://api.example.com/v1?q=1").allowed
+    assert not p.evaluate("https://api.example.com/v1extra/admin").allowed
+
+
+def test_api_base_url_without_path_rejects_lookalike_host() -> None:
+    # A base URL with no path must not match a look-alike host by string prefix.
+    p = _policy(api={"base_urls": ["https://api.example.com"]}, web={"domains": []})
+    assert p.evaluate("https://api.example.com/anything").allowed
+    assert not p.evaluate("https://api.example.com.evil.com/x").allowed
+
+
 # --- network -----------------------------------------------------------------
 
 def test_ip_in_cidr_and_exact_host() -> None:

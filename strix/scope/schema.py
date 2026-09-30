@@ -301,13 +301,28 @@ def _as_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
 
 
 def _url_prefix_matches(target: str, base: str) -> bool:
+    """Whether ``target`` is at or under the authorized ``base`` URL.
+
+    A plain ``startswith`` is too loose for an authorization boundary: it lets an
+    authorized base like ``https://api.example.com/v1`` also match
+    ``https://api.example.com/v1extra`` (same-host path-scope widening), and a
+    base with no path match a look-alike host such as
+    ``https://api.example.com.evil.com``. So after the prefix check we require the
+    remainder to start on a path/query/fragment boundary (or be empty).
+    """
+
     def norm(u: str) -> str:
         u = u.strip()
         if "://" not in u:
             u = f"https://{u}"
         return u.rstrip("/").lower()
 
-    return norm(target).startswith(norm(base))
+    normalized_target = norm(target)
+    normalized_base = norm(base)
+    if not normalized_target.startswith(normalized_base):
+        return False
+    remainder = normalized_target[len(normalized_base) :]
+    return remainder == "" or remainder[0] in "/?#"
 
 
 def _parse_cloud_target(target: str) -> tuple[str, str | None]:

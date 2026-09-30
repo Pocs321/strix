@@ -158,6 +158,32 @@ argument handling, evidence shaping, tool registration, and the config. A live i
 deferred to an environment with credentials (or the managed cloud). Also to verify there: that the `mcp`
 `stdio` transport forwards the passthrough env and inherits CWD as assumed.
 
+### Baseline scan via 9Router (dogfooding) — Phase 0 pipeline verified + first self-found fix
+
+**2026-09-30.** Ran the first real end-to-end scan now that Docker is up, using the operator's local
+**9Router** (an OpenAI-compatible gateway) as the LLM instead of a paid OpenRouter key — verified
+connectable and wired (see the `strix-llm-via-9router` note for the config: `STRIX_LLM=openai/<id>` **must**
+keep the `openai/` prefix, `LLM_API_BASE=http://localhost:20128/v1`). Command:
+`uv run strix -n -t ./ --scan-mode quick --max-turns 25` with `openai/cc/claude-sonnet-5`.
+
+- **Pipeline works end-to-end through 9Router:** `status: completed`, 22 LLM requests with tool-calls, the
+  sandbox built and the report/SARIF/`run.json` artifacts were written (`strix_runs/strix2_4ef2/`).
+- **0 validated findings** — correct: no PoC was built (the run hit the 25-turn budget first), so nothing
+  was filed. The no-false-positive discipline held.
+- **The scan found a real bug in our own Phase 0 scope code** and, correctly, recorded it as a
+  `needs_follow_up` lead rather than a finding: `strix/scope/schema.py::_url_prefix_matches` used a plain
+  `startswith`, so an authorized `api.base_urls` entry `.../v1` also matched `.../v1extra` (same-host
+  path-scope widening; also a look-alike-host prefix match when a base has no path). **Fixed**: the match
+  now requires a `/`, `?`, `#`, or end-of-string boundary after the base. Regression tests added
+  (`test_api_base_url_requires_path_boundary`, `test_api_base_url_without_path_rejects_lookalike_host`).
+- **Cost/perf note:** $5.27 for 22 turns (2.5M input tokens). 9Router returned **no prompt-cache hits**
+  (`cached_tokens: 0`), so each turn re-billed the full ~100–140 K context — expensive per turn. Keep
+  `--max-turns` low over 9Router, prefer a cheaper model (`ds/*`) for routine runs, and note Strix's
+  `--max-budget-usd` did track cost here but cannot be relied on for arbitrary gateway model ids.
+
+Phase 0 acceptance ("a **validated** web finding with a PoC") still needs a **running vulnerable web app**
+as target; `-t ./` is a code review and proved the pipeline, not that gate.
+
 ## Phase 4 — Generalized finding + PoC validator (in progress)
 
 Semantics signed off (`04-validator-semantics.md`, all defaults). Landed the **candidate (lead) tier** —
