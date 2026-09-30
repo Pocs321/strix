@@ -1124,7 +1124,7 @@ def test_vuln_tool_exposes_new_params() -> None:
     assert "advisory_cvss" in dep_required
 
 
-_FIX_LOCATION = {
+_FIX_LOCATION: dict[str, Any] = {
     "file": "app/views.py",
     "start_line": 10,
     "end_line": 12,
@@ -1132,7 +1132,7 @@ _FIX_LOCATION = {
     "fix_after": 'query = "SELECT * FROM t WHERE id=%s"',
 }
 
-_INFO_LOCATION = {
+_INFO_LOCATION: dict[str, Any] = {
     "file": "app/views.py",
     "start_line": 10,
     "end_line": 12,
@@ -2173,6 +2173,30 @@ def test_update_marks_preparation_stale_when_candidate_cannot_be_rebuilt(
     assert report["fix_preparation"]["state"] == "stale"
     assert "changed after preparation" in report["fix_preparation"]["stop_reason"]
     assert report["fix_candidate"] is None
+
+
+def test_update_keeps_preparation_ready_for_pr_text_only_edit(
+    report_state: ReportState,
+) -> None:
+    """The pull-request body is not part of the reviewed candidate, so editing it
+    alone cannot invalidate a ready preparation."""
+    _seed_weak_report(report_state)
+    report = report_state.vulnerability_reports[0]
+    report["fix_candidate"] = {
+        "security_invariant": "Parametrize the query.",
+        "draft_edits": [],
+    }
+    report["fix_preparation"] = {"state": "ready", "candidate_digest": "0" * 64}
+
+    result = _do_update(
+        report_id="vuln-0009",
+        update_reason="Polishing the pull request body.",
+        fields={"fix_pr_body": "## Fix\nEncode output."},
+    )
+
+    assert result["success"] is True
+    assert report["fix_pr_body"] == "## Fix\nEncode output."
+    assert report["fix_preparation"]["state"] == "ready"
 
 
 def _seed_saved_report(report_state: ReportState) -> Path:

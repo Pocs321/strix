@@ -446,7 +446,6 @@ _FIX_CANDIDATE_FIELDS = frozenset(
         "poc_description",
         "evidence",
         "fix_verification",
-        "fix_pr_body",
         "fix_candidate_blocker",
     }
 )
