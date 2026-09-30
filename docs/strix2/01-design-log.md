@@ -349,3 +349,19 @@ signals, reset). CI gate extended to `strix/router` + `strix/guard`.
 **Not yet:** wiring `NoProgressDetector` into the turn loop (`core/execution.py`) to actually warn/stop a
 stalled agent, and cross-run recon caching (keyed by target+tool) — both need integration into the run loop
 and are deferred as their own increments.
+
+## Phase 6 — evaluation lab + honest metrics (started)
+
+The scoring **engine** (`strix/eval/`) is code; the eval **lab** (target apps + ground-truth files) is
+documented in `docs/strix2/06-eval-lab.md`. `metrics.score(findings, ground_truth, candidates, cost)` returns
+a `Scorecard`: finding-level **precision**, GT-level **recall**, **F1**, the two-tier **candidate recall**
+(an issue surfaced as a lead counts here, not toward findings — so precision is never inflated by filing leads
+as findings), and **$-per-finding / $-per-TP** from the run's real `llm_usage.cost`. A finding matches a
+ground-truth entry on normalized target + optional `title_contains`/`cwe` refiners; a *candidate* matches on
+target (+ title) only, since leads carry no CWE. `harness.score_run(run_dir, gt)` reads a completed run's
+`vulnerabilities.json` / `candidates.json` / `run.json`, and `python -m strix.eval <run_dir> <gt.yaml>`
+prints a markdown or `--json` scorecard. Pure + fully unit-tested (`tests/test_strix2_eval.py`), no run
+required. CI gate extended to `strix/eval`.
+
+**Not yet:** committing concrete lab targets + ground-truth files (they are the operator's authorized labs),
+and a multi-run trend/regression report across model/scope/scan-mode changes.
