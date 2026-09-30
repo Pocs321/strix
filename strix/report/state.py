@@ -487,7 +487,7 @@ class ReportState:
 
         changed: dict[str, Any] = {}
         for key, raw_value in fields.items():
-            if key not in UPDATABLE_REPORT_FIELDS or raw_value is None:
+            if key not in UPDATABLE_REPORT_FIELDS or (raw_value is None and key != "fix_candidate"):
                 continue
             value = raw_value
             if isinstance(value, str):
@@ -892,7 +892,7 @@ class ReportState:
         repo_targets = [
             target
             for target in targets
-            if isinstance(target, dict) and target.get("type") == "repository"
+            if isinstance(target, dict) and target.get("type") in {"repository", "local_code"}
         ]
         # Provenance binds the whole run to one repo; with multiple repo targets
         # that's ambiguous, so omit it rather than mis-attributing later repos'
@@ -904,6 +904,8 @@ class ReportState:
         if not isinstance(details, dict):
             return None
         uri = details.get("target_repo")
+        if target.get("type") == "local_code" and details.get("target_path"):
+            uri = Path(details["target_path"]).resolve().as_uri()
         if not isinstance(uri, str) or not uri.strip():
             return None
 
@@ -911,7 +913,7 @@ class ReportState:
         full_name = _parse_repo_full_name(uri)
         if full_name:
             context["repositoryFullName"] = full_name
-        cloned = details.get("cloned_repo_path")
+        cloned = details.get("cloned_repo_path") or details.get("target_path")
         if isinstance(cloned, str) and cloned.strip():
             commit, branch = _git_head(cloned.strip())
             if commit:

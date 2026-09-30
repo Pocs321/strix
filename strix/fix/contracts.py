@@ -158,6 +158,19 @@ class FindingContext(ContractModel):
     remediation: str = ""
 
 
+class FixCandidateBlocker(ContractModel):
+    """Why the reporting agent cannot hand off a code fix for this finding."""
+
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason")
+    @classmethod
+    def nonempty_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("explain what prevents a code fix")
+        return value.strip()
+
+
 class FixCandidateV1(ContractModel):
     version: Literal["1"] = "1"
     source_identity: SourceIdentity | None = None
@@ -168,11 +181,14 @@ class FixCandidateV1(ContractModel):
     reported_checks: list[ReportedCheck] = []
     known_gaps: list[str] = []
     finding: FindingContext | None = None
+    blocker: FixCandidateBlocker | None = None
 
     def digest(self) -> str:
         data = self.model_dump(mode="json")
         if self.finding is None:
             data.pop("finding", None)  # Preserve digests for stored legacy candidates.
+        if self.blocker is None:
+            data.pop("blocker", None)
         if data.get("reproduction") and data["reproduction"].get("command"):
             data["reproduction"]["command"].pop("purpose", None)
         payload = json.dumps(
@@ -295,10 +311,12 @@ def candidate_from_legacy_report(
     *,
     source_identity: SourceIdentity | None = None,
 ) -> FixCandidateV1 | None:
+    raw_blocker = report.get("fix_candidate_blocker")
+    blocker = FixCandidateBlocker.model_validate(raw_blocker) if raw_blocker is not None else None
     raw_locations = report.get("code_locations")
-    if not isinstance(raw_locations, list):
+    if not isinstance(raw_locations, list) and blocker is None:
         return None
-    location_values = cast("list[object]", raw_locations)
+    location_values = cast("list[object]", raw_locations) if isinstance(raw_locations, list) else []
 
     locations: list[CandidateLocation] = []
     edits: list[FixEdit] = []
@@ -329,7 +347,7 @@ def candidate_from_legacy_report(
         except ValueError:
             continue
 
-    if not locations:
+    if not locations and blocker is None:
         return None
 
     invariant = str(
@@ -348,6 +366,7 @@ def candidate_from_legacy_report(
     reproduction = str(report.get("poc_description") or report.get("evidence") or "").strip()
     return FixCandidateV1(
         source_identity=source_identity,
+        blocker=blocker,
         security_invariant=invariant,
         finding_locations=locations,
         draft_edits=edits,

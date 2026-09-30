@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from agents import RunContextWrapper, function_tool
 
+from strix.fix.contracts import FixCandidateBlocker
 from strix.tools.nullish import clean_optional
 from strix.tools.proxy.tools import existing_request_ids
 
@@ -87,7 +88,7 @@ def _normalize_code_locations(
                     if field in ("snippet", "fix_before", "fix_after")
                     else str(value).strip()
                 )
-                if text:
+                if text or field == "fix_after":
                     normalized[field] = text
         if normalized.get("file") and normalized.get("start_line") is not None:
             cleaned.append(normalized)
@@ -340,7 +341,7 @@ def _validate_fix_verification(
     fix_verification: str | None,
 ) -> list[str]:
     """Require a verification statement whenever an applyable fix is proposed."""
-    if not locations or not any(loc.get("fix_after") for loc in locations):
+    if not locations or not any("fix_after" in loc for loc in locations):
         return []
     if str(fix_verification or "").strip():
         return []
@@ -383,13 +384,16 @@ def _fix_source_context(
         return None, None
     raw_targets = cast("object", report_state.run_record.get("targets_info"))
     targets = cast("list[object]", raw_targets) if isinstance(raw_targets, list) else []
-    if len(targets) != 1:
-        return SourceIdentity(kind=SourceIdentityKind.COMMIT, value=commit), None
-    raw_target = targets[0]
+    repo_targets = [
+        t for t in targets if isinstance(t, dict) and t.get("type") in {"repository", "local_code"}
+    ]
+    if len(repo_targets) != 1:
+        return None, None
+    raw_target = repo_targets[0]
     target = cast("dict[str, object]", raw_target) if isinstance(raw_target, dict) else {}
     raw_details = target.get("details")
     details = cast("dict[str, object]", raw_details) if isinstance(raw_details, dict) else {}
-    repo_path = details.get("cloned_repo_path")
+    repo_path = details.get("cloned_repo_path") or details.get("target_path")
     repository = context.get("repositoryUri")
     return (
         SourceIdentity(
@@ -412,7 +416,7 @@ def _build_fix_candidate(
     candidate = candidate_from_legacy_report(report_fields, source_identity=source_identity)
     if candidate is None:
         return None
-    if repo_path is not None:
+    if repo_path is not None and candidate.blocker is None:
         try:
             anchored, results = anchor_candidate(repo_path, candidate)
         except Exception as exc:  # noqa: BLE001
@@ -442,17 +446,48 @@ _FIX_CANDIDATE_FIELDS = frozenset(
         "poc_description",
         "evidence",
         "fix_verification",
+        "fix_pr_body",
+        "fix_candidate_blocker",
     }
 )
+
+
+def _fix_handoff(
+    report_state: ReportState, fields: Mapping[str, object]
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Require edits or an explanation, without requiring the scanner to repair the repo."""
+    candidate = _build_fix_candidate(report_state, fields)
+    targets = report_state.run_record.get("targets_info") or []
+    has_source = any(
+        isinstance(target, dict) and target.get("type") in {"repository", "local_code"}
+        for target in targets
+    )
+    if candidate and candidate.get("blocker"):
+        if candidate.get("draft_edits"):
+            return None, [
+                "Choose code edits or fix_candidate_blocker, not both. To withdraw an old fix, "
+                "replace code_locations with locations without fix_before/fix_after (or [])."
+            ]
+        return candidate, []
+    if has_source and (
+        not candidate or not candidate.get("draft_edits") or not candidate.get("source_identity")
+    ):
+        return None, [
+            "Repository source is attached. Supply code_locations with relative file paths, "
+            "line ranges, exact fix_before/fix_after pairs and fix_verification; prose in "
+            "technical_analysis or fix_pr_body is not a fix handoff. If the finding cannot "
+            "be mapped or safely fixed, or its source revision is unavailable, supply "
+            'fix_candidate_blocker={"reason": "Explain the missing context or external change"}. '
+            "The blocker preserves the vulnerability without inventing a patch."
+        ]
+    return candidate, []
 
 
 def _refresh_fix_candidate(
     report_state: ReportState,
     report_id: str,
     changes: dict[str, Any],
-) -> None:
-    if not _FIX_CANDIDATE_FIELDS.intersection(changes):
-        return
+) -> list[str]:
     existing = next(
         (
             report
@@ -462,15 +497,37 @@ def _refresh_fix_candidate(
         None,
     )
     if existing is None:
-        return
-    candidate = _build_fix_candidate(report_state, {**existing, **changes})
-    if candidate is not None:
+        return []
+    if not _FIX_CANDIDATE_FIELDS.intersection(changes) and existing.get("fix_candidate"):
+        return []
+    merged = {**existing, **changes}
+    if "fix_candidate_blocker" in changes and "code_locations" not in changes:
+        # Explicitly withdrawing a fix must not retain its old edits.
+        merged["code_locations"] = changes["code_locations"] = [
+            {key: value for key, value in loc.items() if key not in {"fix_before", "fix_after"}}
+            for loc in existing.get("code_locations") or []
+        ]
+    # A blocker is kept in the canonical candidate. New locations replace that
+    # decision; unrelated revisions must keep it until there is a real fix.
+    if "fix_candidate_blocker" not in changes and "code_locations" not in changes:
+        merged["fix_candidate_blocker"] = (existing.get("fix_candidate") or {}).get("blocker")
+    if "code_locations" in changes and "fix_verification" not in changes:
+        merged.pop("fix_verification", None)
+    errors = _validate_fix_verification(
+        merged.get("code_locations"), merged.get("fix_verification")
+    )
+    candidate, handoff_errors = _fix_handoff(report_state, merged)
+    if errors or handoff_errors:
+        return errors + handoff_errors
+    changes.pop("fix_candidate_blocker", None)
+    if candidate is not None or "fix_candidate" in existing:
         changes["fix_candidate"] = candidate
     if candidate is not None or existing.get("fix_candidate") or existing.get("fix_preparation"):
         changes["fix_preparation"] = {
             "state": "stale",
             "stop_reason": "The finding or draft candidate changed after preparation.",
         }
+    return []
 
 
 _UPDATE_TEXT_FIELDS = (
@@ -549,11 +606,25 @@ def _collect_update_changes(  # noqa: PLR0912, PLR0915
         errors.extend(_validate_code_locations(locations))
         errors.extend(_validate_fix_verification(locations, changes.get("fix_verification")))
         changes["code_locations"] = locations
+    elif raw_locations == []:
+        changes["code_locations"] = []
     elif raw_locations:
         errors.append(
             "code_locations were dropped as unusable - every location needs a relative "
             "'file' and an integer 'start_line'"
         )
+
+    raw_blocker = fields.get("fix_candidate_blocker")
+    if raw_blocker is not None:
+        try:
+            changes["fix_candidate_blocker"] = FixCandidateBlocker.model_validate(
+                raw_blocker
+            ).model_dump()
+        except ValueError:
+            errors.append(
+                "fix_candidate_blocker needs a non-empty reason explaining "
+                "why no code fix is provided"
+            )
 
     cve, cwe, identifier_errors = _validate_identifiers(
         clean_optional(fields.get("cve")), clean_optional(fields.get("cwe"))
@@ -722,7 +793,7 @@ def _read_revision(
     return changes, None
 
 
-def _do_update(
+def _do_update(  # noqa: PLR0911 - explicit validation and persistence outcomes
     *,
     report_id: str,
     update_reason: str,
@@ -753,7 +824,9 @@ def _do_update(
     class_error = _fit_revision_to_class(report_state, report_id, changes)
     if class_error is not None:
         return class_error
-    _refresh_fix_candidate(report_state, report_id, changes)
+    fix_errors = _refresh_fix_candidate(report_state, report_id, changes)
+    if fix_errors:
+        return {"success": False, "error": "Validation failed", "errors": fix_errors}
 
     try:
         updated = report_state.update_vulnerability_report(
@@ -880,7 +953,7 @@ def _do_delete(
     }
 
 
-async def _do_create(
+async def _do_create(  # noqa: PLR0911 - explicit validation and persistence outcomes
     *,
     title: str,
     description: str,
@@ -906,6 +979,7 @@ async def _do_create(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    fix_candidate_blocker: FixCandidateBlocker | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
@@ -1013,9 +1087,13 @@ async def _do_create(
             "code_locations": parsed_locations,
             "fix_verification": fix_verification,
             "fix_pr_body": fix_pr_body,
+            "fix_candidate_blocker": fix_candidate_blocker,
             "http_exchange_ids": normalized_http_exchange_ids,
         }
-        fix_candidate = _build_fix_candidate(report_state, report_fields)
+        fix_candidate, fix_errors = _fix_handoff(report_state, report_fields)
+        if fix_errors:
+            return {"success": False, "error": "Validation failed", "errors": fix_errors}
+        report_fields.pop("fix_candidate_blocker", None)
         if fix_candidate:
             report_fields["fix_candidate"] = fix_candidate
 
@@ -1111,6 +1189,7 @@ async def create_vulnerability_report(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    fix_candidate_blocker: FixCandidateBlocker | None = None,
 ) -> str:
     """File a vulnerability report — one report per fully-verified finding.
 
@@ -1425,37 +1504,17 @@ async def create_vulnerability_report(
             - Padding ``fix_before`` with surrounding context lines
               that aren't part of the fix.
             - Duplicating the same change across multiple locations.
-        fix_verification: REQUIRED whenever any ``code_locations`` entry
-            carries a ``fix_after``. This field records the reporting
-            agent's checks on the draft candidate. It is not an independent
-            verification result. Before writing this field, work the gates
-            **in order**:
-
-            1. **Security closure** — re-trace the source → sink path
-               through the *patched* code and state why it is now
-               blocked. Re-run the PoC against the fix if you can.
-            2. **Bypass review** — re-read the diff *without* leaning on
-               the rationale that produced it. Name the sibling call
-               sites, equivalent sinks, and alternate malicious input
-               classes you checked, and try at least one.
-            3. **Preserved behavior** — name the legitimate inputs,
-               public APIs, and error semantics that must keep working,
-               and confirm the patch leaves them intact. A fix that
-               breaks the feature is not a fix.
-            4. **Repository checks** — run the narrowest relevant
-               syntax / type / lint / test check that covers the
-               changed lines.
-
-            Then write what you did: the commands you ran and their
-            results, and every gate you could only reason about rather
-            than execute, marked explicitly as a gap. Do not claim that a
-            gate passed because the candidate looks correct. If a gate
-            fails, revise the candidate or drop ``fix_after``.
-
-            Also use this field to record the narrowest-complete-change
-            judgement: prefer the smallest repository-native fix that
-            fully enforces the invariant, using existing helpers, with
-            no unrelated refactors folded in.
+        fix_verification: Required with draft edits, including deletions.
+            Explain why the proposed change addresses the finding and what
+            you checked. Distinguish executed checks from reasoning and
+            name testing gaps. Repair and independent testing happen later;
+            this field does not claim the draft is verified.
+        fix_candidate_blocker: With repository source attached, provide either
+            code_locations containing paired fix_before/fix_after edits and
+            fix_verification, or this object with a concrete reason why you
+            cannot provide a code fix (unmapped code, missing context, or an
+            external configuration change). The finding is still reported.
+            Do not supply a blocker together with draft edits.
         fix_pr_body: Optional. When source is available and you have a
             concrete fix, a markdown PR-description body proposing the
             fix (summary + rationale). Prose/markdown only — the code
@@ -1556,6 +1615,7 @@ async def create_vulnerability_report(
         http_exchange_ids=http_exchange_ids,
         fix_verification=fix_verification,
         fix_pr_body=fix_pr_body,
+        fix_candidate_blocker=fix_candidate_blocker,
         agent_id=agent_id,
         agent_name=agent_name,
     )
@@ -1591,6 +1651,7 @@ async def update_vulnerability_report(
     http_exchange_ids: list[str] | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    fix_candidate_blocker: FixCandidateBlocker | None = None,
     contextual_cvss_reasoning: str | None = None,
 ) -> str:
     """Revise a vulnerability report that is already filed, keeping its id.
@@ -1665,6 +1726,9 @@ async def update_vulnerability_report(
             list to remove all linked exchanges.
         fix_verification: Verification statement for an applyable fix.
         fix_pr_body: Replacement fix PR body.
+        fix_candidate_blocker: Explain why no code fix can be provided; clears
+            the previous candidate's edits. New paired code_locations resolve
+            the blocker. Source-backed reports cannot silently drop their fix.
         contextual_cvss_reasoning: Dependency findings only. What you
             observed in this codebase that justifies the contextual
             ``cvss_breakdown``.
@@ -1710,6 +1774,7 @@ async def update_vulnerability_report(
         "http_exchange_ids": http_exchange_ids,
         "fix_verification": fix_verification,
         "fix_pr_body": fix_pr_body,
+        "fix_candidate_blocker": fix_candidate_blocker,
         "contextual_cvss_reasoning": contextual_cvss_reasoning,
     }
     if http_exchange_warning and all(value is None for value in fields.values()):

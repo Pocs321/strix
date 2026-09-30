@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -130,6 +131,23 @@ def _request(candidate: FixCandidateV1, *, attempts: int = 2) -> FixPreparationR
         max_agent_turns=8,
         network_allowed=True,
     )
+
+
+async def test_explicit_candidate_blocker_does_not_start_agents(tmp_path: Path) -> None:
+    workspace, _commit = _workspace(tmp_path)
+    candidate = FixCandidateV1.model_validate(
+        {
+            "security_invariant": "Guard access",
+            "blocker": {"reason": "Affected source is unavailable."},
+        }
+    )
+    repair, review = AsyncMock(), AsyncMock()
+    result = await prepare_fix(_request(candidate), workspace, repair=repair, verify=review)
+    assert result.state is PreparationState.BLOCKED
+    assert result.stop_reason == candidate.blocker.reason
+    assert result.attempts == 0
+    repair.assert_not_awaited()
+    review.assert_not_awaited()
 
 
 async def _noop_repair(
@@ -557,6 +575,7 @@ def test_new_command_metadata_does_not_change_existing_finding_digest(tmp_path: 
     candidate = _candidate(commit)
     payload = candidate.model_dump(mode="json")
     payload.pop("finding")
+    payload.pop("blocker")
     payload["reproduction"]["command"].pop("purpose")
     previous = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

@@ -308,10 +308,16 @@ async def prepare_fix(  # noqa: PLR0915 - thin orchestration and cleanup
             gaps=gaps,
         )
 
-    async def execute() -> FixPreparationResultV1:  # noqa: PLR0911 - explicit terminal outcomes
+    async def execute() -> FixPreparationResultV1:  # noqa: PLR0911, PLR0912 - terminal outcomes
         nonlocal checks, verifier, repair_turns, review_turns
         if cancelled():
             raise PreparationCancelledError
+        if context.candidate.blocker:
+            return await finish(
+                PreparationState.BLOCKED,
+                context.candidate.blocker.reason,
+                gaps=[context.candidate.blocker.reason],
+            )
         if not await source_verifier(context):
             return await finish(
                 PreparationState.STALE,

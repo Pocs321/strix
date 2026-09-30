@@ -27,6 +27,20 @@ agent instructions, not a separate controller that selects or interprets tests.
 
 ## Completion and handoffs
 
+Before preparation, a source-backed scan report must supply paired `fix_before` /
+`fix_after` edits in `code_locations` plus `fix_verification`, or an explicit
+`fix_candidate_blocker` with a reason. Prose in `fix_pr_body` alone is not a code
+handoff. This also applies to external tests with an attached repository. Black-box
+findings without repository source can still be reported without code locations.
+The verification note describes draft reasoning and testing gaps; the scanner does
+not need to implement or test the fix before reporting the vulnerability.
+
+The blocker is stored as `fix_candidate.blocker`. It preserves the finding and
+explains why preparation cannot start. Updating with a blocker withdraws old edits;
+new paired locations and verification replace it. Hosted callers persist the whole
+candidate and its digest together, and candidate changes invalidate old preparations
+and revoke outstanding callbacks.
+
 Agents finish through Strix's `agent_finish` tool:
 
 - Repair: `done` starts review; `blocked` stops and preserves work.

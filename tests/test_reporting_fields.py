@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -1139,6 +1140,175 @@ _INFO_LOCATION = {
 }
 
 
+def _attach_source(state: ReportState, tmp_path: Path, *, local: bool = False) -> str:
+    repo = tmp_path / "source"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app/views.py").write_text(_FIX_LOCATION["fix_before"] + "\n")
+    for args in (
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base"],
+    ):
+        subprocess.run(["/usr/bin/git", "-C", str(repo), *args], check=True)  # noqa: S603
+    state.run_record["targets_info"] = [
+        {"type": "web_application", "details": {"target_url": "https://example.com"}},
+        {
+            "type": "local_code" if local else "repository",
+            "details": {"target_path": str(repo)}
+            if local
+            else {
+                "target_repo": "https://github.com/example/app",
+                "cloned_repo_path": str(repo),
+            },
+        },
+    ]
+    return subprocess.run(  # noqa: S603
+        ["/usr/bin/git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("locations", [None, [], [_INFO_LOCATION]])
+async def test_source_report_requires_edits_or_blocker(
+    report_state: ReportState,
+    tmp_path: Path,
+    locations: Any,
+) -> None:
+    _attach_source(report_state, tmp_path)
+    result = await _create_with(
+        report_state, code_locations=locations, fix_pr_body="Use parameters."
+    )
+    assert not result["success"]
+    assert "fix_candidate_blocker" in " ".join(result["errors"])
+    assert not report_state.vulnerability_reports
+
+
+@pytest.mark.parametrize("local", [False, True])
+async def test_mixed_source_report_persists_candidate_identity(
+    report_state: ReportState,
+    tmp_path: Path,
+    local: bool,
+) -> None:
+    commit = _attach_source(report_state, tmp_path, local=local)
+    result = await _create_with(
+        report_state,
+        code_locations=[_FIX_LOCATION],
+        fix_verification="Traced the draft; tests pending.",
+    )
+    assert result["success"], result
+    candidate = report_state.vulnerability_reports[0]["fix_candidate"]
+    assert candidate["source_identity"]["value"] == commit
+    assert candidate["source_identity"]["repository"]
+    assert candidate["draft_edits"][0]["before"] == _FIX_LOCATION["fix_before"]
+
+
+async def test_source_without_revision_can_report_explicit_blocker(
+    report_state: ReportState,
+) -> None:
+    report_state.run_record["targets_info"] = [{"type": "repository", "details": {}}]
+    rejected = await _create_with(
+        report_state, code_locations=[_FIX_LOCATION], fix_verification="Traced the draft."
+    )
+    assert not rejected["success"]
+    result = await _create_with(
+        report_state, fix_candidate_blocker={"reason": "The checkout revision is unavailable."}
+    )
+    assert result["success"], result
+    candidate = report_state.vulnerability_reports[0]["fix_candidate"]
+    assert candidate["blocker"]["reason"] == "The checkout revision is unavailable."
+    assert candidate["draft_edits"] == []
+
+
+async def test_update_withdraws_and_replaces_candidate(
+    report_state: ReportState,
+    tmp_path: Path,
+) -> None:
+    _attach_source(report_state, tmp_path)
+    await _create_with(
+        report_state, code_locations=[_FIX_LOCATION], fix_verification="Draft review."
+    )
+    report_id = report_state.vulnerability_reports[0]["id"]
+    assert not _do_update(
+        report_id=report_id, update_reason="withdraw", fields={"code_locations": []}
+    )["success"]
+    result = _do_update(
+        report_id=report_id,
+        update_reason="external change needed",
+        fields={
+            "fix_candidate_blocker": {"reason": "Requires an upstream service change."},
+        },
+    )
+    assert result["success"], result
+    report = report_state.vulnerability_reports[0]
+    assert report["fix_candidate"]["draft_edits"] == []
+    assert report["fix_preparation"]["state"] == "stale"
+    assert "fix_after" not in report["code_locations"][0]
+    result = _do_update(
+        report_id=report_id, update_reason="more evidence", fields={"evidence": "New evidence"}
+    )
+    assert result["success"], result
+    assert report_state.vulnerability_reports[0]["fix_candidate"]["blocker"]
+    result = _do_update(
+        report_id=report_id,
+        update_reason="local fix found",
+        fields={
+            "code_locations": [_FIX_LOCATION],
+            "fix_verification": "Draft trace; tests pending.",
+        },
+    )
+    assert result["success"], result
+    candidate = report_state.vulnerability_reports[0]["fix_candidate"]
+    assert candidate["draft_edits"]
+    assert candidate["blocker"] is None
+
+
+async def test_blackbox_candidate_can_be_explicitly_cleared(report_state: ReportState) -> None:
+    await _create_with(
+        report_state, code_locations=[_FIX_LOCATION], fix_verification="Draft review."
+    )
+    report_id = report_state.vulnerability_reports[0]["id"]
+    result = _do_update(
+        report_id=report_id, update_reason="source no longer applies", fields={"code_locations": []}
+    )
+    assert result["success"], result
+    report = report_state.vulnerability_reports[0]
+    assert report["fix_candidate"] is None
+    assert report["code_locations"] == []
+    assert report["fix_preparation"]["state"] == "stale"
+
+
+async def test_deletion_edit_is_kept_and_requires_verification(report_state: ReportState) -> None:
+    location = {**_FIX_LOCATION, "fix_after": ""}
+    rejected = await _create_with(report_state, code_locations=[location])
+    assert not rejected["success"]
+    result = await _create_with(
+        report_state, code_locations=[location], fix_verification="Remove the unsafe statement."
+    )
+    assert result["success"], result
+    assert report_state.vulnerability_reports[0]["fix_candidate"]["draft_edits"][0]["after"] == ""
+
+
+def test_reporting_tools_expose_optional_fix_blocker() -> None:
+    for tool in (create_vulnerability_report, update_vulnerability_report):
+        assert "fix_candidate_blocker" in tool.params_json_schema["properties"]
+
+
+async def test_legacy_source_report_update_requires_fix_handoff(
+    report_state: ReportState,
+    tmp_path: Path,
+) -> None:
+    created = await _create_with(report_state)
+    _attach_source(report_state, tmp_path)
+    result = _do_update(
+        report_id=created["report_id"], update_reason="Correct title", fields={"title": "New title"}
+    )
+    assert not result["success"]
+    assert "fix_candidate_blocker" in " ".join(result["errors"])
+    assert report_state.vulnerability_reports[0]["title"] == "X"
+
+
 async def test_fix_after_requires_verification(report_state: ReportState) -> None:
     result = await _create_with(report_state, code_locations=[_FIX_LOCATION])
     assert result["success"] is False
@@ -2002,7 +2172,7 @@ def test_update_marks_preparation_stale_when_candidate_cannot_be_rebuilt(
     assert report["code_locations"] == [{"file": "./files.py", "start_line": 4, "end_line": 9}]
     assert report["fix_preparation"]["state"] == "stale"
     assert "changed after preparation" in report["fix_preparation"]["stop_reason"]
-    assert report["fix_candidate"] == candidate
+    assert report["fix_candidate"] is None
 
 
 def _seed_saved_report(report_state: ReportState) -> Path:
