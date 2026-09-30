@@ -88,6 +88,20 @@ Rows are provisional targets; each is confirmed and promoted to ✅ when its wra
 > scope + candidate discipline as in-sandbox native tools / skills (Phase 2/3), not as MCP wrappers.
 > Host-side MCP is for tooling that must hold credentials off the sandbox (cloud) — see the design log.
 
+## Referenced knowledge sources (not vendored)
+
+Strix 2's internal skill playbooks (`strix/skills2/`) are **original**, tailored to Strix's own tools and the
+two-tier / scope discipline. They *link* to external methodology collections for deeper technique detail; we
+reference these, we do not copy or vendor their files.
+
+| Source | What | License |
+|---|---|---|
+| [mukul975/Anthropic-Cybersecurity-Skills](https://github.com/mukul975/Anthropic-Cybersecurity-Skills) | 800+ agent cybersecurity skill guides (network / api / infra / cloud pentest, mapped to MITRE ATT&CK / NIST) | Apache-2.0 |
+
+> Apache-2.0 is compatible with this repo's Apache-2.0 license. The `skills2/` playbooks are original and only
+> **link** to the source as further reading. If substantive text from a referenced source is ever adapted
+> into a skill file, add its attribution here and keep the license notice at that point.
+
 ## Method for confirming a license before wrapping
 1. Read the tool's `LICENSE` at the pinned version.
 2. Confirm we invoke it as a separate process (no linking/vendoring of its code).

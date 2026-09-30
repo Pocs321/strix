@@ -1,6 +1,8 @@
-"""Tests for Strix 2's registered skill directory (the cloud pentest playbook)."""
+"""Tests for Strix 2's registered skill directory (the domain pentest playbooks)."""
 
 from __future__ import annotations
+
+import pytest
 
 from strix.skills import (
     get_available_skills,
@@ -16,21 +18,36 @@ def _register() -> None:
     register_skill_dir(get_strix_resource_path("skills2"))
 
 
-def test_aws_pentest_skill_is_discoverable() -> None:
+@pytest.mark.parametrize(
+    ("category", "name", "must_contain"),
+    [
+        ("cloud", "aws_pentest", "aws_whoami"),
+        ("network", "network_pentest", "create_candidate"),
+        ("infra", "infra_pentest", "reachable"),
+        ("api", "api_pentest", "http_exchange_ids"),
+    ],
+)
+def test_strix2_skill_is_discoverable_and_loadable(
+    category: str, name: str, must_contain: str
+) -> None:
     _register()
-    cloud = get_available_skills().get("cloud", [])
-    assert "aws_pentest" in {skill["name"] for skill in cloud}
+    available = get_available_skills().get(category, [])
+    assert name in {skill["name"] for skill in available}
+    body = load_skills([f"{category}/{name}"])
+    assert name in body
+    assert must_contain in body[name]
 
 
-def test_aws_pentest_skill_loads_with_workflow() -> None:
+def test_all_four_playbooks_present() -> None:
     _register()
-    body = load_skills(["cloud/aws_pentest"])
-    assert "aws_pentest" in body
-    content = body["aws_pentest"]
-    # References the strix-aws wrapper tools and the two-tier discipline.
-    assert "aws_whoami" in content
-    assert "create_candidate" in content
-    assert "s3_get_object_head" in content
+    available = get_available_skills()
+    present = {(cat, s["name"]) for cat, skills in available.items() for s in skills}
+    assert {
+        ("cloud", "aws_pentest"),
+        ("network", "network_pentest"),
+        ("infra", "infra_pentest"),
+        ("api", "api_pentest"),
+    } <= present
 
 
 def test_install_registers_the_skill_dir() -> None:

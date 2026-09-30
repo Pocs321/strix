@@ -219,12 +219,27 @@ registered root, `strix/skills2/`, wired via `register_skill_dir(get_strix_resou
 same-name files would shadow, so ours use distinct names). Registered dirs are searched ahead of the
 built-ins, and `strix/skills2/**/*.md` ships in the wheel like the other packaged non-`.py` resources.
 
-**Landed:** `strix/skills2/cloud/aws_pentest.md` — the scoped, evidence-first AWS workflow that drives the
-`strix-aws` wrapper: name the principal (`aws_whoami`) → read-only recon into `create_candidate` leads
-(public S3, over-permissive IAM, `0.0.0.0/0` SGs, enumerable secrets) → validate impact into findings with
-captured I/O (the bounded S3 read; or demonstrate a should-be-denied action *as the least-priv principal*) →
-the validator §5 evidence bundle. It encodes the no-false-positive rules (read-only preferred, intrusive
-gated, config/version-only stays a candidate, out-of-scope ⇒ stop). Tests: `tests/test_strix2_skills.py`.
+**Landed (4 playbooks):** each is scoped, evidence-first, wired to Strix's actual tools + the two-tier model,
+and ends with the validator §5 evidence bundle and the no-false-positive rules (read-only preferred,
+intrusive gated, config/version/banner-only stays a candidate, out-of-scope ⇒ stop):
+- `cloud/aws_pentest.md` — drives the `strix-aws` wrapper (principal → recon candidates → validated read).
+- `network/network_pentest.md` — in-sandbox `nmap`/`naabu`/`httpx`/`nuclei`; open port/banner/version-CVE are
+  candidates, a demonstrated live-service consequence with captured I/O is the finding.
+- `infra/infra_pentest.md` — `trivy`/`semgrep` static hits are candidates; runtime demo or a reachable path
+  (reusing the dependency reachability ladder) validates.
+- `api/api_pentest.md` — OWASP API Top 10 on the Caido proxy; upstream's verified `http_exchange_ids` bar is
+  unchanged, a captured cross-principal/forged-request impact is the finding.
+
+Tests: `tests/test_strix2_skills.py` (discovery + load for all four).
+
+**External-skill assessment (asked by the maintainer).** Reviewed `mukul975/Anthropic-Cybersecurity-Skills`
+(818 skills, Apache-2.0, MITRE/NIST-mapped). Verdict: high-quality and directly relevant (network/api/infra/
+cloud pentest), and license-compatible — but **not drop-in**: it's the agentskills/plugin format
+(`skills/<name>/SKILL.md` + `scripts/agent.py`), generic and human-operator-oriented (Burp/Kali/RoE), and not
+wired to Strix's tools, two-tier tiers, or scope engine; 818 of them would be noise. Decision: keep our
+`skills2/` playbooks **original and tailored**, and **link** to the relevant external skills as further
+reading (recorded in `THIRD_PARTY.md` as a referenced, non-vendored source). If we ever adapt substantive
+text, we attribute it there and keep the Apache-2.0 notice.
 
 ## Phase 4 — Generalized finding + PoC validator (in progress)
 
