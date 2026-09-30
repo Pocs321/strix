@@ -632,61 +632,6 @@ DEFAULT_MODEL_RETRY = ModelRetrySettings(
     ),
 )
 
-RECOMMENDED_MODEL_NAMES = (
-    "zai/glm-5.3",
-    "zai/glm-5.3-flash",
-    "openai/gpt-5.6-sol",
-    "openai/gpt-5.6-terra",
-    "openai/gpt-5.6-luna",
-    "openai/gpt-5.6",
-    "openai/gpt-5.5-pro",
-    "openai/gpt-5.5",
-    "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "anthropic/claude-fable-5-1",
-    "anthropic/claude-fable-5",
-    "anthropic/claude-opus-5",
-    "anthropic/claude-opus-4-8",
-    "anthropic/claude-sonnet-5",
-    "anthropic/claude-sonnet-4-6",
-    "vertex_ai/gemini-3.1-pro-preview",
-    "gemini/gemini-3.1-pro-preview",
-    "vertex_ai/gemini-3.7-flash",
-    "gemini/gemini-3.7-flash",
-    "gemini/gemini-3.6-flash",
-    "deepseek/deepseek-v4-pro",
-    "deepseek/deepseek-v4-flash",
-    "dashscope/qwen3.8-max",
-    "dashscope/qwen3.7-max-2026-06-08",
-    "moonshot/kimi-k3",
-    "moonshot/kimi-k2.7-code",
-)
-
-_RECOMMENDED_MODEL_NAME_SET = frozenset(name.lower() for name in RECOMMENDED_MODEL_NAMES)
-
-# Matched against the bare model name only: the route (``openai/``, ``openrouter/``,
-# a local gateway, ...) says nothing about the model's quality.
-FRONTIER_MODEL_PREFIXES = (
-    "gpt-5",
-    "claude-fable-5",
-    "claude-opus-5",
-    "claude-opus-4",
-    "claude-sonnet-5",
-    "claude-sonnet-4",
-    "gemini-3",
-    "deepseek-v4",
-    "deepseek-r1",
-    "deepseek-reasoner",
-    "qwen3.8",
-    "qwen3.7",
-    "qwen3-max",
-    "kimi-k3",
-    "kimi-k2.7",
-    "kimi-k2.6",
-    "glm-5.3",
-    "glm-5.2",
-)
-
 
 def configure_sdk_model_defaults(settings: Settings) -> None:
     """Apply Strix config to SDK-native defaults."""
@@ -945,43 +890,6 @@ def model_supports_reasoning(model_name: str) -> bool:
     if entry is None and "/" in name:
         entry = litellm.model_cost.get(name.rsplit("/", 1)[1])
     return bool(entry and entry.get("supports_reasoning"))
-
-
-def is_recommended_or_frontier_model(model_name: str) -> bool:
-    """Return whether a model is recommended or in a frontier model family."""
-    name = _normalized_model_name(model_name)
-    if not name:
-        return False
-    if name in _RECOMMENDED_MODEL_NAME_SET:
-        return True
-    bare_model_name = name.rsplit("/", 1)[-1]
-    return _matches_model_prefix(bare_model_name, FRONTIER_MODEL_PREFIXES)
-
-
-def _normalized_model_name(model_name: str) -> str:
-    name = model_name.strip().lower()
-    for prefix in ("litellm/", "any-llm/"):
-        if name.startswith(prefix):
-            name = name[len(prefix) :]
-            break
-    return name
-
-
-def _matches_model_prefix(model_name: str, model_prefixes: tuple[str, ...]) -> bool:
-    return any(
-        candidate.startswith(prefix)
-        for candidate in _model_name_candidates(model_name)
-        for prefix in model_prefixes
-    )
-
-
-def _model_name_candidates(model_name: str) -> tuple[str, ...]:
-    if "." not in model_name:
-        return (model_name,)
-    suffixes = tuple(
-        model_name.split(".", index)[-1] for index in range(1, model_name.count(".") + 1)
-    )
-    return (model_name, *suffixes)
 
 
 def is_known_openai_bare_model(model_name: str) -> bool:

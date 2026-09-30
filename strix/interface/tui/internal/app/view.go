@@ -423,25 +423,10 @@ func (m Model) splashView() string {
 	content := wordmark() + "\n\n" +
 		welcome + "\n" + version + "\n" + tagline + "\n\n" +
 		start.String() + "\n\n" + url
-	if warn := m.snapshot.ModelWarning; warn != "" {
-		content += "\n\n" + splashModelWarning(m.snapshot.Model, warn)
-	}
 	panel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(green).Padding(1, 6).Align(lipgloss.Center).Render(content)
 	// #splash_screen background is solid black.
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel,
 		lipgloss.WithWhitespaceBackground(black))
-}
-
-// splashModelWarning renders the backend's full warning sentence, with the
-// model name highlighted when the sentence leads with it.
-func splashModelWarning(model, warning string) string {
-	yellow := lipgloss.Color("#eab308")
-	out := lipgloss.NewStyle().Bold(true).Foreground(yellow).Render("⚠ ")
-	if model != "" && strings.HasPrefix(warning, model) {
-		out += lipgloss.NewStyle().Bold(true).Foreground(render.Cyan).Render(model)
-		warning = strings.TrimPrefix(warning, model)
-	}
-	return out + lipgloss.NewStyle().Foreground(yellow).Render(warning)
 }
 
 // chatPaneKey identifies everything the bordered trace depends on.
