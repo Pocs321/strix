@@ -150,3 +150,32 @@ def enforce_arguments(arguments: Any, *, intrusive: bool = False) -> ScopeDecisi
         if decision is not None:
             return decision
     return None
+
+
+# Network-reaching CLIs shipped in the sandbox image. A shell command that invokes
+# one of these is scope-checked at the exec boundary (defense-in-depth). ``nc`` is
+# intentionally excluded as too short/ambiguous to word-match safely; ``ncat`` is in.
+_NETWORK_TOOL_RE = re.compile(
+    r"\b(?:nmap|ncat|naabu|masscan|httpx|nuclei|curl|wget|subfinder|katana|gospider"
+    r"|ffuf|sqlmap|wpscan|dirsearch|wafw00f|arjun|interactsh-client|dnsx|whatweb"
+    r"|nikto|amass|sslscan|testssl)\b"
+)
+
+
+def enforce_shell_command(command: str) -> ScopeDecision | None:
+    """Deny a sandbox shell command that reaches an out-of-scope host.
+
+    Defense-in-depth at the ``exec_command`` boundary, mirroring the ``call_mcp``
+    check. It is a **no-op** when no scope policy is loaded (so upstream behavior is
+    unchanged and non-scope runs are never blocked) or when the command does not
+    invoke a known network-reaching CLI. When it does, the command string is scanned
+    for high-confidence targets (URLs / IPs / ARNs) and the first out-of-scope one is
+    denied. Extraction is conservative — bare hostnames are not matched — so a legit
+    command is not rejected over an ambiguous argument; the authoritative per-target
+    check still lives in the domain tools.
+    """
+    if _active_policy is None:
+        return None
+    if not _NETWORK_TOOL_RE.search(command or ""):
+        return None
+    return enforce_arguments(command)

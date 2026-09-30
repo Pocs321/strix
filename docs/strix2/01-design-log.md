@@ -22,6 +22,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | `strix/tools/mcp/agent_tools.py` | +1 import, `call_mcp` calls new `_scope_denial(arguments)` before dispatch | Enforce `scope.yaml` at the MCP boundary the brief names. No-op when no policy is loaded / no high-confidence target found, so upstream MCP behavior is unchanged. | 1 |
 | `strix/interface/cli_args.py` | Added `--scope-config` and `--allow-intrusive` flags → set `STRIX_SCOPE_CONFIG` / `STRIX_ALLOW_INTRUSIVE` env (mirrors the existing `--mcp-*` pattern) | Let the operator point at a scope file and gate intrusive actions from the CLI. | 1 |
 | `pyproject.toml` | +`boto3.*`/`botocore.*` to the mypy `ignore_missing_imports` overrides; +a ruff per-file `PLC0415` ignore for `strix/mcp_servers/aws.py` | boto3 ships no type stubs (mypy strict), and the wrapper imports boto3/botocore lazily so the main process never drags in the heavy SDK. Config-only; no product-code change. | 1 |
+| `strix/agents/factory.py` | +1 import; `_wrap_exec_command` calls `enforce_shell_command(command)` before dispatch and returns a refusal string if out of scope | Enforce `scope.yaml` at the shell boundary for network-reaching in-sandbox CLIs (defense-in-depth, mirrors the `call_mcp` check). No-op without a policy or for non-network commands, so upstream behavior is unchanged. | 3 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -240,6 +241,28 @@ wired to Strix's tools, two-tier tiers, or scope engine; 818 of them would be no
 `skills2/` playbooks **original and tailored**, and **link** to the relevant external skills as further
 reading (recorded in `THIRD_PARTY.md` as a referenced, non-vendored source). If we ever adapt substantive
 text, we attribute it there and keep the Apache-2.0 notice.
+
+## Phase 3 — Domain enforcement in the sandbox (started)
+
+**Scope gate at the `exec_command` boundary.** The in-sandbox network CLIs (`nmap`/`naabu`/`nuclei`/`httpx`/
+`curl`/…) are driven by the agent through the SDK's `exec_command` tool. A native tool that itself runs a CLI
+in the sandbox was considered and **deferred**: the sandbox session lives inside the SDK's `Shell`-capability
+closure (bound by the `SandboxAgent` runtime), not in Strix's run context, so a custom `@function_tool`
+cannot cleanly reach it — reimplementing that would be deep, hard-to-test SDK coupling. Instead Strix 2 gates
+**at the shell boundary**, mirroring the Phase 1 `call_mcp` check: `enforce_shell_command(command)`
+(`strix/scope/enforcement.py`) is a no-op without a scope policy (upstream unchanged) and when the command
+invokes no known network CLI; otherwise it scans the command for high-confidence targets (URLs/IPs/ARNs) and
+refuses the first out-of-scope one. Wired into `factory._wrap_exec_command` (one small, logged edit); it
+returns a clear refusal string, not an exception, so the agent adapts. This is **generic across every
+in-sandbox network CLI**, not a single nmap tool.
+
+Together with the `network_pentest` skill (candidate discipline) and the candidate tools, the in-sandbox
+network CLIs now carry the Strix 2 scope + two-tier discipline. Tests:
+`tests/test_strix2_scope_enforcement.py`.
+
+**Deferred (needs an SDK sandbox seam):** structured native tools that run a CLI in the sandbox and parse its
+output, and pre-seeded network/cloud specialist agents (spawned via skills+prompt). The boundary gate + the
+domain skills cover the discipline in the meantime.
 
 ## Phase 4 — Generalized finding + PoC validator (in progress)
 

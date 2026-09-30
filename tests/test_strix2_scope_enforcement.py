@@ -8,6 +8,7 @@ import pytest
 
 from strix.scope.enforcement import (
     enforce_arguments,
+    enforce_shell_command,
     enforce_target,
     extract_targets,
     get_active_policy,
@@ -106,6 +107,42 @@ def test_enforce_arguments_allows_when_no_target_present() -> None:
 
 def test_enforce_arguments_noop_without_policy() -> None:
     assert enforce_arguments({"target": "8.8.8.8"}) is None
+
+
+# --- enforce_shell_command (exec boundary) -----------------------------------
+
+def test_shell_command_noop_without_policy() -> None:
+    assert enforce_shell_command("nmap 8.8.8.8") is None  # inactive → allow
+
+
+def test_shell_command_ignores_non_network_commands() -> None:
+    set_active_policy(_policy())
+    # 8.8.8.8 appears, but grep is not a network tool → not scope-checked here.
+    assert enforce_shell_command("grep 8.8.8.8 /workspace/out.txt") is None
+
+
+def test_shell_command_allows_in_scope_network_target() -> None:
+    set_active_policy(_policy())
+    assert enforce_shell_command("nmap -sV 10.0.0.5") is None  # in 10.0.0.0/24
+    assert enforce_shell_command("curl https://example.com/x") is None
+
+
+def test_shell_command_denies_out_of_scope_target() -> None:
+    set_active_policy(_policy())
+    denied = enforce_shell_command("nmap -sV 8.8.8.8")
+    assert denied is not None and not denied.allowed
+    assert enforce_shell_command("curl https://evil.com") is not None
+
+
+def test_shell_command_checks_chained_and_piped_commands() -> None:
+    set_active_policy(_policy())
+    assert enforce_shell_command("naabu -host 8.8.8.8 | tee out.txt") is not None
+    assert enforce_shell_command("cd /tmp && nuclei -u https://evil.com") is not None
+
+
+def test_shell_command_allows_when_no_target_extracted() -> None:
+    set_active_policy(_policy())
+    assert enforce_shell_command("nmap --version") is None  # no host to check
 
 
 # --- load_active_policy ------------------------------------------------------
