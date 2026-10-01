@@ -385,9 +385,25 @@ the one logged `runner.py` swap above — so default behavior is unchanged. Test
 `tests/test_strix2_progress_guard_hooks.py` (10: factory opt-in, threshold, alternating-tools negative,
 per-agent isolation, cap, re-arm, final-nudge wrap-up advice, best-effort robustness).
 
-**Not yet:** cross-run recon caching (keyed by target+tool) — still needs the run loop / a cache store and
-is deferred as its own increment; the native in-sandbox CLI tools remain deferred on the SDK sandbox seam
-(Phase 3).
+**Cross-run recon caching (done, additive, scope-gated).** Recon (port scans, enumeration, cloud listings)
+is expensive and repeats across runs; over a gateway with no prompt caching (9Router) every recon turn the
+agent doesn't repeat is context it isn't re-billed for. `strix/cache/` is a **shared on-disk store** living
+*outside* any run dir (default `~/.strix/recon_cache`, `$STRIX2_RECON_CACHE_DIR` to override), one atomic
+JSON file per entry keyed by `(normalize_tool, normalize_target, params)` with a TTL (default 24h); disable
+with `STRIX2_RECON_CACHE=0`. The agent reaches it through three `@function_tool`s (`recon_cache_get` /
+`recon_cache_put` / `recon_cache_stats`) in `strix/tools/cache/`, each **scope-gated** via `enforce_target`
+(an out-of-scope target is refused), registered via `strix2_ext` — **zero new upstream edits**. The tool
+bodies live in plain `_do_*` helpers (directly unit-testable); the wrappers only pull caller identity.
+**Deliberately not** auto-served at the `exec_command` boundary: transparently returning a cached scan would
+present stale recon as fresh, so the cache is explicit and every hit is stamped with its age + a "re-verify
+time-sensitive state" note. Wired into the methodology by short "reuse recon across runs" notes in the
+network / cloud / infra playbooks (the cloud recon table also gained the new RDS/EBS/KMS tools). Tests:
+`tests/test_strix2_recon_cache.py` (20: key normalization, TTL/max-age freshness, round-trip, too-large,
+purge/clear/stats, disabled, scope refusal, registration). CI gate extended to `strix/cache` +
+`strix/tools/cache`.
+
+**Not yet:** native in-sandbox CLI tools that run+parse a scan remain deferred on the SDK sandbox seam
+(Phase 3); auto-populating the recon cache from those tools' output would then be a natural follow-up.
 
 ## Phase 6 — evaluation lab + honest metrics (started)
 
