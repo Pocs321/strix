@@ -26,6 +26,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | `strix/agents/prompt.py` | `_resolve_skills` appends `coordination/strix2_domains` for the root agent (+docstring) | Load Strix 2's domain-delegation guidance into the root system prompt. The template already renders every loaded skill via a generic loop, so no template edit is needed; a logged skip if `skills2` isn't registered, so upstream is unchanged. | 3 |
 | `strix/agents/factory.py` | +1 import; `SandboxAgent(model=…)` now `resolve_agent_model(skills, is_root=is_root)` instead of `None` | Per-role model routing (Phase 5). Returns `None` unless `STRIX2_ROUTER` is enabled → the SDK uses the global provider default, so behavior is unchanged by default. | 5 |
 | `strix/core/runner.py` | `hooks = ReportUsageHooks(...)` → `hooks = build_run_hooks(...)` (swap constructor; import `build_run_hooks`, drop the now-unused `ReportUsageHooks` import) | Wire the opt-in no-progress guard into the SDK run-hooks lifecycle. `build_run_hooks` returns a plain `ReportUsageHooks` unless `STRIX2_PROGRESS_GUARD` is set, and the guard is a subclass, so the return type, `extend_budget`, and all budget/turn behavior are unchanged when the guard is off (3rd runner edit). | 5 |
+| `strix/report/state.py` | `_write_artifacts` calls `enrich_run_sarif(run_dir)` right after `write_sarif` (+1 lazy import), inside the existing SARIF try/except | Fold the finding-annotation sidecar's ATT&CK/CIS/domain tags into the SARIF that was just written. No-op without annotations (upstream-only runs unchanged); the emitter (`sarif.py`) is untouched, and a failure can't harm the base SARIF already on disk. | 4 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -332,11 +333,21 @@ The **domain evidence channel** itself is the finding's existing required `evide
 I/O), which the domain skills already instruct the agent to fill (command+response, cloud
 principal+policy+region, runtime repro); the sidecar's `notes` points at it and the `domain` tags the class.
 
+**SARIF framework-tag emission (done).** `strix/findings2/sarif_enrich.py` folds the sidecar's ATT&CK/CIS/
+domain tags into the written `findings.sarif`: it matches each SARIF result to its annotation by the finding
+id (`result.properties.strix.id` == the `vuln-NNNN` the agent passes to `annotate_finding`), adds
+`mitre:*` / `cis:*` / `domain:*` tags to that result's rule (so code-scanning / ASPM can filter by them) and
+a per-finding `result.properties.strix.frameworks` block. It runs as a **post-write enrichment** of the
+already-emitted file, so the upstream SARIF emitter (`sarif.py`) is **untouched**; the only wiring is one
+guarded, logged line in `report/state.py` (no-op without annotations). Atomic rewrite, idempotent. Tests:
+`tests/test_strix2_sarif_enrich.py` (8: tag/frameworks emission, CIS, unmatched-id + empty no-ops, file
+round-trip + idempotency, end-to-end from the store).
+
 **Not yet:** first-class network/cloud `finding_class` values inside the upstream schema (would need the
 `_VALID_FINDING_CLASSES` whitelist + a `finding_class` param threaded through `create_vulnerability_report`
 → `add_vulnerability_report` → writer/SARIF — deferred as a deliberate, larger edit to the crux module; the
-sidecar `domain` covers classification additively meanwhile); scope-coupled proof helpers; SARIF emission of
-the framework tags.
+sidecar `domain` covers classification additively, and it now rides in the SARIF too); scope-coupled proof
+helpers.
 
 ## Phase 5 — model router + no-progress guard (started)
 
