@@ -719,12 +719,15 @@ class ManagedIndependentVerifier(_FixAgent):
 
 async def _create_command_sandbox(
     sandbox_id: str,
+    *,
+    network_allowed: bool = False,
 ) -> BaseSandboxSession:
     settings = load_settings()
     bundle = await session_manager.create_or_reuse(
         sandbox_id,
         image=settings.runtime.image,
         local_sources=[],
+        network_allowed=network_allowed,
     )
     return cast("BaseSandboxSession", bundle["session"])
 
@@ -933,7 +936,9 @@ async def run_isolated_fix_preparation(
             f"fix-preparation-{request.finding_id}-"
             f"{request.candidate.digest()[:12]}-{attempt_digest}"
         )
-        sandbox_session = await _create_command_sandbox(sandbox_id)
+        sandbox_session = await _create_command_sandbox(
+            sandbox_id, network_allowed=request.network_allowed
+        )
         environment = _RuntimeEnvironment(
             workspace=mirror,
             sandbox_session=sandbox_session,

@@ -290,7 +290,10 @@ async def prepare_fix(  # noqa: PLR0911, PLR0912
             if completion.source_digest != await workspace_digest(workspace):
                 return await finish(PreparationState.BLOCKED, "Source changed after completion.")
             if verify is None:
-                return await finish(PreparationState.READY, completion.summary)
+                return await finish(
+                    PreparationState.BLOCKED,
+                    "Independent verification is required before delivery.",
+                )
             before_review = await workspace_digest(workspace)
             attempt = FixPreparationAttempt(
                 attempt=1,
@@ -304,6 +307,8 @@ async def prepare_fix(  # noqa: PLR0911, PLR0912
             context.feedback.append(attempt)
             verifier = await verify(context, attempt.checks)
             attempt.verifier = verifier
+            if cancelled():
+                raise PreparationCancelledError  # noqa: TRY301
             after_review = await workspace_digest(workspace)
             if after_review != before_review:
                 return await finish(

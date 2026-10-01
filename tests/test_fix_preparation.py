@@ -368,15 +368,50 @@ def test_candidate_keeps_full_finding_without_inventing_reproduction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_tests_are_reused_without_controller_execution(tmp_path):
+async def test_unreviewed_completion_never_exports_a_patch(tmp_path):
     workspace, commit = _workspace(tmp_path)
-    result = await prepare_fix(_request(_candidate(commit)), workspace, repair=_noop_repair)
-    assert result.state is PreparationState.READY
+    export = AsyncMock()
+    result = await prepare_fix(
+        _request(_candidate(commit)), workspace, repair=_noop_repair, manifest_builder=export
+    )
+    assert result.state is PreparationState.BLOCKED
+    assert "Independent verification is required" in result.stop_reason
+    assert not result.final_file_manifest
+    assert result.artifact_ref is None
+    export.assert_not_awaited()
     assert result.validation_mode == "single_agent"
     assert result.completion.status == RepairStatus.COMPLETE
     assert result.verifier is None
     assert result.checks == result.completion.command_results
     assert "Ran 1 test" in result.checks[0].output
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_review_never_exports_a_patch(tmp_path):
+    workspace, commit = _workspace(tmp_path)
+    stopped = False
+
+    async def verify(context, _checks):
+        nonlocal stopped
+        stopped = True
+        return VerifierResult(
+            decision=VerificationDecision.VERIFIED,
+            summary="Approved.",
+            source_digest=await workspace_digest(context.workspace),
+        )
+
+    export = AsyncMock()
+    result = await prepare_fix(
+        _request(_candidate(commit)),
+        workspace,
+        repair=_noop_repair,
+        verify=verify,
+        cancelled=lambda: stopped,
+        manifest_builder=export,
+    )
+    assert result.state is PreparationState.FAILED
+    assert "cancelled" in result.stop_reason
+    export.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -514,6 +549,13 @@ async def test_completion_limitations_are_preserved_at_top_level(tmp_path):
         completion = await _noop_repair(context, checks)
         return completion.model_copy(update={"gaps": ["External integration was not exercised."]})
 
-    result = await prepare_fix(_request(_candidate(commit)), workspace, repair=agent)
+    async def verify(context, _checks):
+        return VerifierResult(
+            decision=VerificationDecision.VERIFIED,
+            summary="Approved with the recorded limitation.",
+            source_digest=await workspace_digest(context.workspace),
+        )
+
+    result = await prepare_fix(_request(_candidate(commit)), workspace, repair=agent, verify=verify)
     assert result.state is PreparationState.READY
     assert result.gaps == result.completion.gaps == ["External integration was not exercised."]

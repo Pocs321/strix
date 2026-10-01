@@ -74,12 +74,15 @@ def suite_commands() -> list[Any]:
 
 class ScriptedModel(Model):
     def __init__(self, repair: list[Any], review: list[Any] | None = None) -> None:
-        self.responses = {"repair": repair, "review": review or []}
+        self.responses = {
+            "repair": repair,
+            "review": review if review is not None else [finish("done", "Independently approved.")],
+        }
         self.inputs: dict[str, list[Any]] = {"repair": [], "review": []}
         self.tools: set[str] = set()
 
     async def get_response(self, **kwargs: Any) -> ModelResponse:
-        role = "review" if "Independently review" in kwargs["system_instructions"] else "repair"
+        role = "review" if "Independently verify" in kwargs["system_instructions"] else "repair"
         self.inputs[role].append(list(kwargs["input"]))
         self.tools.update(t.name for t in kwargs["tools"])
         assert self.responses[role], f"Unexpected additional {role} turn"
@@ -164,13 +167,15 @@ async def scenario(
 
 
 @pytest.mark.asyncio
-async def test_single_agent_implements_runs_both_test_suites_and_exports(tmp_path, monkeypatch):
+async def test_agent_implements_runs_both_test_suites_and_exports_after_review(
+    tmp_path, monkeypatch
+):
     model = ScriptedModel([*patch(), *suite_commands(), finish("done", "Both suites passed")])
     result, _env = await scenario(tmp_path, monkeypatch, model)
     assert result.state is PreparationState.READY, result.model_dump_json()
-    assert result.validation_mode == "single_agent"
-    assert not model.inputs["review"]
-    assert result.verifier is None
+    assert result.validation_mode == "agent_review"
+    assert model.inputs["review"]
+    assert result.verifier.summary == "Independently approved."
     assert result.completion.turns_used == 5
     assert all("Ran 1 test" in c.output for c in result.checks[-2:])
     assert {"exec_command", "apply_patch", "agent_finish"} <= model.tools
@@ -189,7 +194,7 @@ async def test_agent_corrects_failed_test_in_same_conversation(tmp_path, monkeyp
     assert result.state is PreparationState.READY
     assert any(c.exit_code != 0 for c in result.checks)
     assert all(c.exit_code == 0 for c in result.checks[-2:])
-    assert not model.inputs["review"]
+    assert model.inputs["review"]
 
 
 @pytest.mark.asyncio

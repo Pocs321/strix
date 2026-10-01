@@ -188,6 +188,51 @@ async def test_finding_revision_invalidates_active_completion(tmp_path):
     assert not fixes._current("finding", digest)
 
 
+@pytest.mark.parametrize("change", ["revised", "withdrawn", "unconfirmed"])
+async def test_finding_changed_before_delivery_discards_reviewed_patch(
+    tmp_path, monkeypatch, change
+):
+    fixes, report, _, _, reports, context, _ = setup(tmp_path)
+    callback = None
+
+    async def spawn(**kwargs):
+        nonlocal callback
+        callback = kwargs["on_complete"]
+        fixes.coordinator.runtimes["fix"] = SimpleNamespace(
+            task=asyncio.create_task(asyncio.sleep(0))
+        )
+        return {"success": True, "agent_id": "fix"}
+
+    async def finish_preparation(request, _env, _hooks, _result, _session, artifact):
+        artifact.write_bytes(b"reviewed patch")
+        if change == "revised":
+            report["fix_candidate"]["security_invariant"] = "Revised attack"
+        elif change == "withdrawn":
+            reports.clear()
+        else:
+            report["validation_status"] = "unconfirmed"
+        return scan_module.FixPreparationResultV1(
+            state="ready",
+            stop_reason="Approved.",
+            source_identity=request.candidate.source_identity,
+            candidate=request.candidate,
+            candidate_digest=request.candidate.digest(),
+            artifact_ref=str(artifact),
+        )
+
+    monkeypatch.setattr(scan_module, "finish_native_fix", finish_preparation)
+    fixes.sink = AsyncMock(return_value=True)
+    await fixes.spawn(
+        "finding", spawn, parent_ctx=context.context, name="Fix", task="Repair", skills=[]
+    )
+    with pytest.raises(ValueError, match="changed or was withdrawn"):
+        await callback(None, None)
+    assert fixes.records["finding"]["status"] == "stopped"
+    assert "artifact" not in fixes.records["finding"]
+    assert not list((tmp_path / "state/fixes").glob("*/prepared-fix.zip"))
+    assert all(call.args[2:] == (None, None) for call in fixes.sink.await_args_list)
+
+
 @pytest.mark.asyncio
 async def test_worktree_process_cleanup_never_terminates_parent_sessions(tmp_path):
     parent = LocalSandbox(tmp_path)

@@ -329,6 +329,9 @@ class ScanFixes:
                     prepared = await finish_native_fix(
                         request, environment, hooks, result, session, artifact
                     )
+                    if not self._current(finding_id, digest):
+                        prepared = None
+                        raise ValueError("The finding changed or was withdrawn during Fix.")  # noqa: TRY301
                     prepared.elapsed_seconds = time.monotonic() - started_at
                     delivered = await self._emit(
                         "finished",

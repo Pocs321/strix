@@ -49,6 +49,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-review-turns", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--max-budget", type=float, help="Combined LLM cost budget in USD.")
     parser.add_argument("--timeout", type=int, help="Whole-job timeout in seconds.")
+    parser.add_argument(
+        "--allow-network",
+        action="store_true",
+        default=None,
+        help="Allow sandbox network access using the operator-configured Docker network.",
+    )
     return parser
 
 
@@ -80,7 +86,6 @@ def _load_request(args: argparse.Namespace) -> FixPreparationRequestV1:
             scan_id=str(finding.get("scan_id") or "local"),
             finding_id=str(finding.get("id") or args.finding_id or uuid.uuid4().hex),
             candidate=candidate,
-            network_allowed=True,
         )
     if (
         request.candidate.source_identity is None
@@ -95,6 +100,7 @@ def _load_request(args: argparse.Namespace) -> FixPreparationRequestV1:
             "max_review_turns": args.max_review_turns,
             "max_budget_usd": args.max_budget,
             "timeout_seconds": args.timeout,
+            "network_allowed": args.allow_network,
         }.items()
         if value is not None
     }
@@ -116,10 +122,10 @@ def _summary(result: FixPreparationResultV1) -> str:
     lines = ["# Fix preparation", "", f"Status: {result.state.value}", "", result.stop_reason]
     if result.completion:
         lines.extend(["", "## Fix", "", result.completion.summary])
-    elif result.verifier:
-        lines.extend(["", "## Review", "", result.verifier.summary])
     elif result.attempt_history:
         lines.extend(["", "## Repair", "", result.attempt_history[-1].repair.summary])
+    if result.verifier:
+        lines.extend(["", "## Review", "", result.verifier.summary])
     lines.extend(["", "## Recorded commands", "", "Includes diagnostic and superseded attempts."])
     lines.extend(
         f"- {check.name}: {check.status.value}; exit code {check.exit_code}."

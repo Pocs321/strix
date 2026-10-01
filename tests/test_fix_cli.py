@@ -54,11 +54,48 @@ def test_cli_role_budget_overrides(tmp_path: Path) -> None:
     assert (loaded.repair_turn_limit, loaded.review_turn_limit) == (300, 250)
 
 
-def _local_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: ScriptedModel) -> None:
+@pytest.mark.parametrize("allow_network", [False, True])
+@pytest.mark.parametrize("input_kind", ["finding", "request"])
+def test_cli_network_access_requires_opt_in(
+    tmp_path: Path, allow_network: bool, input_kind: str
+) -> None:
+    request = _request("a" * 40)
+    assert request.network_allowed is False
+    path = tmp_path / "input.json"
+    path.write_text(
+        request.model_dump_json()
+        if input_kind == "request"
+        else json.dumps({"fix_candidate": request.candidate.model_dump(mode="json")})
+    )
+    argv = [f"--{input_kind}", str(path), "--repo", str(tmp_path)]
+    if allow_network:
+        argv.append("--allow-network")
+    assert (
+        fix_cli._load_request(fix_cli._parser().parse_args(argv)).network_allowed is allow_network
+    )
+
+
+def test_cli_preserves_explicit_request_network_policy(tmp_path: Path) -> None:
+    request = _request("a" * 40)
+    request.network_allowed = True
+    path = tmp_path / "request.json"
+    path.write_text(request.model_dump_json())
+    args = fix_cli._parser().parse_args(["--request", str(path), "--repo", str(tmp_path)])
+    assert fix_cli._load_request(args).network_allowed is True
+
+
+def _local_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model: ScriptedModel,
+    *,
+    allow_network: bool = False,
+) -> None:
     root = tmp_path / "execution" / "source"
     original_environment = fix_runtime._RuntimeEnvironment
 
-    async def sandbox(_sandbox_id: str) -> LocalSandbox:
+    async def sandbox(_sandbox_id: str, *, network_allowed: bool) -> LocalSandbox:
+        assert network_allowed is allow_network
         return LocalSandbox(root.parent)
 
     async def noop(*_args: Any) -> None:
@@ -82,8 +119,9 @@ def _local_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: Scrip
 
 
 @pytest.mark.parametrize("blocked", [False, True])
+@pytest.mark.parametrize("allow_network", [False, True])
 def test_cli_runs_shared_workflow_and_preserves_original_checkout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked: bool, allow_network: bool
 ) -> None:
     workspace, _ = _workspace(tmp_path)
     commit = existing_suite(workspace)
@@ -94,12 +132,13 @@ def test_cli_runs_shared_workflow_and_preserves_original_checkout(
     review = (
         [shell("exit 1"), finish("blocked", "Required tests need a customer database.")]
         if blocked
-        else [*suite_commands(), finish("approved", "Existing and regression tests passed.")]
+        else [*suite_commands(), finish("done", "Existing and regression tests passed.")]
     )
     model = ScriptedModel(
-        [*patch(), *(review if blocked else [*suite_commands(), finish("done", "tests passed")])]
+        [*patch(), *(review if blocked else [*suite_commands(), finish("done", "tests passed")])],
+        review=[] if blocked else review,
     )
-    _local_runtime(monkeypatch, tmp_path, model)
+    _local_runtime(monkeypatch, tmp_path, model, allow_network=allow_network)
     output = tmp_path / "result.json"
 
     code = fix_cli.run_fix(
@@ -112,6 +151,7 @@ def test_cli_runs_shared_workflow_and_preserves_original_checkout(
             str(workspace),
             "--output",
             str(output),
+            *(["--allow-network"] if allow_network else []),
         ]
     )
 
@@ -124,6 +164,10 @@ def test_cli_runs_shared_workflow_and_preserves_original_checkout(
         ".md"
     ).read_text()
     if not blocked:
+        assert (
+            "## Review\n\nExisting and regression tests passed."
+            in output.with_suffix(".md").read_text()
+        )
         with zipfile.ZipFile(output.with_suffix(".zip")) as artifact:
             assert "files/tests/test_security.py" in artifact.namelist()
             assert "tool-results.jsonl" in artifact.namelist()
@@ -320,6 +364,7 @@ def test_summary_includes_followups_from_repair_and_reviewer() -> None:
         source_identity=request.candidate.source_identity,
         candidate=request.candidate,
         candidate_digest=request.candidate.digest(),
+        completion=attempt.repair,
         attempt_history=[attempt],
         verifier=VerifierResult(
             decision=VerificationDecision.VERIFIED,
@@ -328,6 +373,8 @@ def test_summary_includes_followups_from_repair_and_reviewer() -> None:
         ),
     )
     summary = fix_cli._summary(result)
+    assert "## Fix\n\nPatched." in summary
+    assert "## Review\n\nApproved." in summary
     assert "re-run the nightly suite" in summary
     assert "rotate the leaked token" in summary
 
