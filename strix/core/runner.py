@@ -35,7 +35,6 @@ from strix.core.execution import (
     spawn_child_agent as start_child_agent,
 )
 from strix.core.hooks import BudgetExceededError, recomputed_budget_flags
-from strix.guard.hooks import build_run_hooks
 from strix.core.inputs import (
     build_root_task,
     build_scan_targets,
@@ -44,6 +43,7 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.guard.hooks import build_run_hooks
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
 from strix.strix2_ext import install_strix2_extensions
