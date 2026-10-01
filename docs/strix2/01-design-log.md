@@ -376,5 +376,14 @@ target (+ title) only, since leads carry no CWE. `harness.score_run(run_dir, gt)
 prints a markdown or `--json` scorecard. Pure + fully unit-tested (`tests/test_strix2_eval.py`), no run
 required. CI gate extended to `strix/eval`.
 
-**Not yet:** committing concrete lab targets + ground-truth files (they are the operator's authorized labs),
-and a multi-run trend/regression report across model/scope/scan-mode changes.
+**Ground-truth templates (added).** Shipped `eval/` with copy-ready ground-truth templates —
+`ground_truth/juice-shop.example.yaml`, `dvwa.example.yaml`, `aws-cloud-lab.example.yaml` — plus
+`eval/README.md` and a `targets/` placeholder. They are expected-finding **metadata only**: no target is
+stood up and no account is authorized by them (authorization + the live lab stay the operator's, same rule
+as any run). The `.example.yaml` naming signals "copy, re-target, prune." `tests/test_strix2_eval_examples.py`
+discovers each template, asserts `id`/`target` present + unique ids, and scores a synthetic perfect run
+against it so the targets provably normalize + match — guarding the templates against scoring-schema drift.
+The cloud template deliberately exercises the new RDS/EBS/KMS checks. Zero upstream edits.
+
+**Not yet:** committing concrete lab *targets* themselves (the operator's authorized labs), and a multi-run
+trend/regression report across model/scope/scan-mode changes.

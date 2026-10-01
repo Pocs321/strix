@@ -21,6 +21,13 @@ eval/
 Targets are the user's own authorized labs (e.g. a local juice-shop / DVWA container, a test S3 bucket, a
 lab AWS account). Only ever run against targets you are authorized to test — the same rule as any Strix run.
 
+**Committed templates.** `eval/ground_truth/*.example.yaml` ship ready-to-copy ground-truth for two
+well-known training apps (OWASP Juice Shop, DVWA) and a cloud-lab shape (public S3 / RDS / EBS snapshot /
+KMS / IAM, exercising the AWS wrapper's read-only checks). They are *metadata only* — not targets and not
+authorization. Copy one to `eval/ground_truth/<name>.yaml`, point the `target:` values at **your** lab, and
+prune to what you actually deployed. `tests/test_strix2_eval_examples.py` keeps them valid + self-scoreable
+against the schema. See `eval/README.md`.
+
 ## Ground-truth format
 A YAML (or JSON) file with a list of expected findings. `id` and `target` are required; the rest refine the
 match:
