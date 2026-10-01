@@ -1,3 +1,5 @@
+# mypy: allow-untyped-defs, allow-untyped-calls, disable-error-code="method-assign,var-annotated"
+
 """Persisted findings launch native Fix children in isolated worktrees."""
 
 from __future__ import annotations
@@ -104,7 +106,8 @@ async def test_native_parallel_fixes_deliver_patches_and_preserve_scan_source(
 
     def config(env):
         model = models.setdefault(
-            env.execution_id, ScriptedModel([*patch(), *suite_commands(), finish("done")])
+            env.execution_id,
+            ScriptedModel([*patch(), *suite_commands(), finish("done"), finish("done")]),
         )
         return RunConfig(
             model=model, sandbox=SandboxRunConfig(session=env.session), tracing_disabled=True
@@ -204,7 +207,7 @@ async def test_native_child_keeps_cumulative_turn_cap_and_does_not_export_partia
 ):
     fixes, _, _, _, _, context, sessions = setup(tmp_path)
     fixes.records["finding"] = {"digest": "older-candidate", "turns": 299, "status": "done"}
-    model = ScriptedModel([*patch(), finish("done")])
+    model = ScriptedModel([*patch(), finish("done"), finish("done")])
     monkeypatch.setattr(
         scan_module,
         "_run_config",
@@ -235,7 +238,7 @@ async def test_seven_saved_findings_start_seven_native_children_without_model_ha
         scan_module,
         "_run_config",
         lambda env: RunConfig(
-            model=ScriptedModel([*patch(), *suite_commands(), finish("done")]),
+            model=ScriptedModel([*patch(), *suite_commands(), finish("done"), finish("done")]),
             sandbox=SandboxRunConfig(session=env.session),
             tracing_disabled=True,
         ),
@@ -266,6 +269,79 @@ async def test_seven_saved_findings_start_seven_native_children_without_model_ha
     assert all(r["status"] == "done" for r in fixes.records.values()), fixes.records
     assert len([s for s in stages if s[0] == "started"]) == 7
     assert _git(source, "status", "--porcelain") == ""
+    for session in sessions:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_thread_persistence_starts_exactly_one_native_child(tmp_path, monkeypatch):
+    fixes, report, _, _, _, context, sessions = setup(tmp_path)
+    state = ReportState("threaded-handoff")
+    state._run_dir = tmp_path / "report"
+    fixes.report_state = state
+    monkeypatch.setattr(
+        scan_module,
+        "_run_config",
+        lambda env: RunConfig(
+            model=ScriptedModel([*patch(), *suite_commands(), finish("done"), finish("done")]),
+            sandbox=SandboxRunConfig(session=env.session),
+            tracing_disabled=True,
+        ),
+    )
+    stages = []
+
+    async def sink(stage, saved, _result, _artifact):
+        stages.append((stage, saved["id"]))
+        return True
+
+    fixes.sink = sink
+    fixes.start(fixes._native_spawn, context.context)
+    finding_id = await asyncio.to_thread(
+        state.add_vulnerability_report,
+        title="Unsafe threaded result",
+        severity="high",
+        agent_id="reporter",
+        validation_status="confirmed",
+        fix_candidate=report["fix_candidate"],
+    )
+    for saved in state.get_existing_vulnerabilities():
+        fixes.notify(saved)
+    await fixes.wait()
+    assert fixes.records[finding_id]["status"] == "done"
+    assert [stage for stage in stages if stage == ("started", finding_id)] == [
+        ("started", finding_id)
+    ]
+    for session in sessions:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_reconciles_persisted_candidate_after_missed_notification(tmp_path, monkeypatch):
+    fixes, report, _, _, _, context, sessions = setup(tmp_path)
+    state = ReportState("missed-handoff")
+    state._run_dir = tmp_path / "report"
+    fixes.report_state = state
+    monkeypatch.setattr(
+        scan_module,
+        "_run_config",
+        lambda env: RunConfig(
+            model=ScriptedModel([*patch(), *suite_commands(), finish("done"), finish("done")]),
+            sandbox=SandboxRunConfig(session=env.session),
+            tracing_disabled=True,
+        ),
+    )
+    fixes.start(fixes._native_spawn, context.context)
+    state.finding_persisted_callback = None
+    finding_id = state.add_vulnerability_report(
+        title="Unsafe missed result",
+        severity="high",
+        agent_id="reporter",
+        validation_status="confirmed",
+        fix_candidate=report["fix_candidate"],
+    )
+    assert finding_id not in fixes.records
+    await fixes.wait()
+    assert fixes.records[finding_id]["status"] == "done"
     for session in sessions:
         session.close()
 

@@ -21,13 +21,13 @@ _PROMPT_DIRNAME = "prompts"
 CACHE_POINT = "<cache_point>"
 
 
-def render_fix_prompt(*, workspace_root: str) -> str:
+def render_fix_prompt(*, workspace_root: str, review: bool = False) -> str:
     """Render a fix assignment without loading scan-only skills."""
     env = Environment(
         loader=FileSystemLoader(get_strix_resource_path("agents", _PROMPT_DIRNAME)),
         autoescape=select_autoescape(enabled_extensions=(), default_for_string=False),
     )
-    template = "fix.jinja"
+    template = "fix_review.jinja" if review else "fix.jinja"
     return str(env.get_template(template).render(workspace_root=workspace_root))
 
 

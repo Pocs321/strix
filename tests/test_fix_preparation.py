@@ -1,3 +1,5 @@
+# mypy: allow-untyped-defs, allow-untyped-calls, disable-error-code="union-attr"
+
 """Tests for fix candidate anchoring and repository preparation."""
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ from strix.fix.contracts import (
     ReproductionSpec,
     SourceIdentity,
     SourceIdentityKind,
+    VerificationDecision,
+    VerifierResult,
     candidate_from_legacy_report,
 )
 from strix.fix.locations import AnchorStatus, anchor_location
@@ -376,6 +380,81 @@ async def test_agent_tests_are_reused_without_controller_execution(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ready_requires_independent_verifier_approval(tmp_path):
+    workspace, commit = _workspace(tmp_path)
+
+    async def verify(context, checks):
+        assert checks
+        return VerifierResult(
+            decision=VerificationDecision.VERIFIED,
+            summary="Attack variants are blocked and legitimate behavior is preserved.",
+            review_basis="execution",
+            source_digest=await workspace_digest(context.workspace),
+        )
+
+    result = await prepare_fix(
+        _request(_candidate(commit)),
+        workspace,
+        repair=_noop_repair,
+        verify=verify,
+    )
+
+    assert result.state is PreparationState.READY
+    assert result.validation_mode == "agent_review"
+    assert result.verifier.decision is VerificationDecision.VERIFIED
+    assert result.attempt_history[0].verifier == result.verifier
+
+
+@pytest.mark.asyncio
+async def test_rejected_independent_verification_blocks_delivery(tmp_path):
+    workspace, commit = _workspace(tmp_path)
+
+    async def verify(_context, _checks):
+        return VerifierResult(
+            decision=VerificationDecision.REJECTED,
+            summary="A sibling path still exposes arbitrary repository files.",
+            gaps=["The security invariant is bypassable."],
+            review_basis="code_review",
+        )
+
+    result = await prepare_fix(
+        _request(_candidate(commit)),
+        workspace,
+        repair=_noop_repair,
+        verify=verify,
+    )
+
+    assert result.state is PreparationState.BLOCKED
+    assert result.verifier.decision is VerificationDecision.REJECTED
+    assert not result.final_file_manifest
+
+
+@pytest.mark.asyncio
+async def test_verifier_cannot_mutate_the_deliverable(tmp_path):
+    workspace, commit = _workspace(tmp_path)
+
+    async def verify(context, _checks):
+        (context.workspace / "app.py").write_text("review mutation\n", encoding="utf-8")
+        return VerifierResult(
+            decision=VerificationDecision.VERIFIED,
+            summary="Approved after changing the patch.",
+            review_basis="code_review",
+            source_digest=await workspace_digest(context.workspace),
+        )
+
+    result = await prepare_fix(
+        _request(_candidate(commit)),
+        workspace,
+        repair=_noop_repair,
+        verify=verify,
+    )
+
+    assert result.state is PreparationState.BLOCKED
+    assert "changed during independent verification" in result.stop_reason
+    assert not result.final_file_manifest
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["blocked", "exception", "cancel"])
 async def test_failed_fix_never_exports_partial_work(tmp_path, stop):
     workspace, commit = _workspace(tmp_path)
@@ -415,7 +494,6 @@ async def test_completed_agent_cannot_deliver_changed_checkpoint(tmp_path):
 
 
 def test_new_command_metadata_does_not_change_existing_finding_digest(tmp_path: Path) -> None:
-
     _root, commit = _workspace(tmp_path)
     candidate = _candidate(commit)
     payload = candidate.model_dump(mode="json")

@@ -23,6 +23,8 @@ from strix.fix.contracts import (
     PreparationState,
     RepairOutcome,
     RepairStatus,
+    VerificationDecision,
+    VerifierResult,
 )
 
 
@@ -46,6 +48,10 @@ class PreparationContext:
 RepairAgent = Callable[
     [PreparationContext, list[CheckResult]],
     Awaitable[RepairOutcome],
+]
+IndependentVerifier = Callable[
+    [PreparationContext, list[CheckResult]],
+    Awaitable[VerifierResult],
 ]
 SourceVerifier = Callable[[PreparationContext], Awaitable[bool]]
 EvidenceReader = Callable[[], Awaitable[list[CheckResult]]]
@@ -213,11 +219,12 @@ async def _verify_source(context: PreparationContext) -> bool:
     return status_process.returncode == 0 and not status_output.strip(b"\x00")
 
 
-async def prepare_fix(  # noqa: PLR0911
+async def prepare_fix(  # noqa: PLR0911, PLR0912
     request: FixPreparationRequestV1,
     workspace: Path,
     *,
     repair: RepairAgent,
+    verify: IndependentVerifier | None = None,
     manifest_builder: ManifestBuilder = build_git_manifest,
     source_verifier: SourceVerifier = _verify_source,
     evidence_reader: EvidenceReader | None = None,
@@ -227,6 +234,8 @@ async def prepare_fix(  # noqa: PLR0911
     started = time.monotonic()
     context = PreparationContext(request=request, workspace=workspace, candidate=request.candidate)
     completion: RepairOutcome | None = None
+    verifier: VerifierResult | None = None
+    attempt_history: list[FixPreparationAttempt] = []
 
     async def finish(state: PreparationState, reason: str) -> FixPreparationResultV1:
         manifest: list[FileManifestEntry] = []
@@ -240,9 +249,14 @@ async def prepare_fix(  # noqa: PLR0911
             candidate=context.candidate,
             candidate_digest=context.candidate.digest(),
             completion=completion,
+            validation_mode="agent_review" if verifier else "single_agent",
             gaps=list(completion.gaps) if completion else [],
             prepared_source_digest=(
-                completion.source_digest if completion and state is PreparationState.READY else None
+                verifier.source_digest
+                if verifier and state is PreparationState.READY
+                else completion.source_digest
+                if completion and state is PreparationState.READY
+                else None
             ),
             final_file_manifest=manifest,
             changed_files=[entry.path for entry in manifest],
@@ -251,6 +265,8 @@ async def prepare_fix(  # noqa: PLR0911
             checks=await evidence_reader()
             if evidence_reader
             else (completion.command_results if completion else []),
+            verifier=verifier,
+            attempt_history=attempt_history,
             attempts=1 if completion else 0,
             elapsed_seconds=time.monotonic() - started,
         )
@@ -273,7 +289,38 @@ async def prepare_fix(  # noqa: PLR0911
                 return await finish(PreparationState.BLOCKED, "The agent produced no patch.")
             if completion.source_digest != await workspace_digest(workspace):
                 return await finish(PreparationState.BLOCKED, "Source changed after completion.")
-            return await finish(PreparationState.READY, completion.summary)
+            if verify is None:
+                return await finish(PreparationState.READY, completion.summary)
+            before_review = await workspace_digest(workspace)
+            attempt = FixPreparationAttempt(
+                attempt=1,
+                repair=completion,
+                checks=await evidence_reader()
+                if evidence_reader
+                else list(completion.command_results),
+                workspace_digest=before_review,
+            )
+            attempt_history.append(attempt)
+            context.feedback.append(attempt)
+            verifier = await verify(context, attempt.checks)
+            attempt.verifier = verifier
+            after_review = await workspace_digest(workspace)
+            if after_review != before_review:
+                return await finish(
+                    PreparationState.BLOCKED,
+                    "The deliverable changed during independent verification.",
+                )
+            if verifier.decision is not VerificationDecision.VERIFIED:
+                return await finish(PreparationState.BLOCKED, verifier.summary)
+            if verifier.source_digest != after_review:
+                return await finish(
+                    PreparationState.BLOCKED,
+                    "Independent verification did not approve the final source snapshot.",
+                )
+            return await finish(
+                PreparationState.READY,
+                "Independent verification approved the draft PR.",
+            )
     except PreparationCancelledError:
         return await finish(PreparationState.FAILED, "Fix preparation was cancelled.")
     except TimeoutError:

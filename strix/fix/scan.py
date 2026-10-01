@@ -74,6 +74,7 @@ class ScanFixes:
         self.report_state = report_state
         self.tasks: dict[str, asyncio.Task[Any]] = {}
         self.dispatches: set[asyncio.Task[Any]] = set()
+        self.loop: asyncio.AbstractEventLoop | None = None
         self.closed = False
         self.base = f"/workspace/.strix-fixes/{hashlib.sha256(scan_id.encode()).hexdigest()[:16]}"
         self._source_lock = asyncio.Lock()
@@ -81,6 +82,7 @@ class ScanFixes:
         self._staged: set[str] = set()
 
     def start(self, spawn: Any, parent_ctx: dict[str, Any]) -> None:
+        self.loop = asyncio.get_running_loop()
         self._native_spawn, self._parent_ctx = spawn, parent_ctx
         self.report_state.finding_persisted_callback = self.notify
         for report in self.report_state.get_existing_vulnerabilities():
@@ -89,9 +91,43 @@ class ScanFixes:
     def notify(self, report: dict[str, Any]) -> None:
         if self.closed:
             return
-        task = asyncio.create_task(self._dispatch(str(report["id"])))
+        if self.loop is None:
+            raise RuntimeError("Start the Fix dispatcher from its owning event loop first.")
+        finding_id = str(report["id"])
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is self.loop:
+            self._schedule(finding_id)
+        else:
+            self.loop.call_soon_threadsafe(self._schedule, finding_id)
+
+    def _schedule(self, finding_id: str) -> None:
+        if self.closed:
+            return
+        task = asyncio.create_task(self._dispatch(finding_id))
         self.dispatches.add(task)
         task.add_done_callback(self.dispatches.discard)
+
+    async def _reconcile(self) -> None:
+        pending = []
+        for report in self.report_state.get_existing_vulnerabilities():
+            finding_id = str(report["id"])
+            try:
+                _, candidate = self._finding(finding_id)
+            except ValueError:
+                continue
+            previous = self.records.get(finding_id, {})
+            running = self.tasks.get(finding_id)
+            if previous.get("digest") == candidate.digest() and (
+                previous.get("status") in {"done", "stopped", "failed"}
+                or (running and not running.done())
+            ):
+                continue
+            pending.append(self._dispatch(finding_id))
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _dispatch(self, finding_id: str) -> None:
         try:
@@ -283,6 +319,7 @@ class ScanFixes:
                 network_allowed=True,
                 cancelled=lambda: not self._current(finding_id, digest),
             )
+            environment.run_config_factory = lambda: _run_config(environment)
             hooks = _FixHooks(environment)
             started_at = time.monotonic()
 
@@ -371,8 +408,9 @@ class ScanFixes:
         shutil.rmtree(directory / "source", ignore_errors=True)
 
     async def wait(self) -> None:
-        self.closed = True
         await asyncio.gather(*self.dispatches, return_exceptions=True)
+        await self._reconcile()
+        self.closed = True
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
 
     async def close(self) -> None:

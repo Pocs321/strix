@@ -47,6 +47,8 @@ from strix.fix import (
     PreparationContext,
     RepairOutcome,
     RepairStatus,
+    VerificationDecision,
+    VerifierResult,
     build_git_manifest,
     build_git_patch,
     prepare_fix,
@@ -85,11 +87,18 @@ def _output_text(text: str, *, max_chars: int | None = _MAX_TOOL_OUTPUT_CHARS) -
 class _FixHooks(ReportUsageHooks):
     """Use Strix usage hooks and retain native tool evidence without deciding test success."""
 
-    def __init__(self, environment: _RuntimeEnvironment) -> None:
-        self.max_turns = min(environment.max_repair_turns, 300)
+    def __init__(
+        self,
+        environment: _RuntimeEnvironment,
+        *,
+        max_turns: int | None = None,
+        track_environment_turns: bool = True,
+    ) -> None:
+        self.max_turns = min(max_turns or environment.max_repair_turns, 300)
         super().__init__(model=load_settings().llm.model or "", max_turns=self.max_turns)
         self.environment = environment
-        self.turns = environment.turns_used
+        self.track_environment_turns = track_environment_turns
+        self.turns = environment.turns_used if track_environment_turns else 0
         self.completion_digest: str | None = None
         self._recent_commands: deque[tuple[str, int, str]] = deque(maxlen=_REPEAT_WINDOW)
         self._repetition_warning = False
@@ -123,8 +132,9 @@ class _FixHooks(ReportUsageHooks):
         self._sync_scan_budget()
         await super().on_llm_start(context, agent, system_prompt, input_items)
         self.turns += 1
-        self.environment.turns_used = self.turns
-        if self.environment.turn_sink:
+        if self.track_environment_turns:
+            self.environment.turns_used = self.turns
+        if self.track_environment_turns and self.environment.turn_sink:
             self.environment.turn_sink(self.turns)
         if self._repetition_warning:
             input_items.append(
@@ -280,6 +290,7 @@ class _RuntimeEnvironment:
     base_commit: str = ""
     validated_digest: str | None = None
     max_repair_turns: int = 300
+    max_review_turns: int = 250
     turns_used: int = 0
     turn_sink: Callable[[int], None] | None = None
     scan_hooks: ReportUsageHooks | None = None
@@ -292,6 +303,7 @@ class _RuntimeEnvironment:
     usage: LLMUsageLedger = field(default_factory=LLMUsageLedger)
     coordinator: AgentCoordinator = field(default_factory=AgentCoordinator)
     pending_commands: dict[int, dict[str, Any]] = field(default_factory=dict[int, dict[str, Any]])
+    run_config_factory: Callable[[], RunConfig] | None = None
 
     def record_command(self, result: CheckResult) -> None:
         self.repair_checks.append(result)
@@ -457,13 +469,18 @@ class _Completion:
     recommendations: list[str] = field(default_factory=list[str])
 
 
-def build_fix_agent(*, name: str = "Fix agent", workspace_root: str) -> Any:
+def build_fix_agent(
+    *,
+    name: str = "Fix agent",
+    workspace_root: str,
+    review: bool = False,
+) -> Any:
     settings = load_settings()
     agent = build_strix_agent(
         name=name,
         is_root=False,
         base_tools=[think, stop_process],
-        instructions_override=render_fix_prompt(workspace_root=workspace_root),
+        instructions_override=render_fix_prompt(workspace_root=workspace_root, review=review),
         chat_completions_tools=uses_chat_completions_tool_schema(
             settings.llm.model or "", settings
         ),
@@ -474,8 +491,9 @@ def build_fix_agent(*, name: str = "Fix agent", workspace_root: str) -> Any:
         replace(
             tool,
             description=(
-                "Finish this assignment with result_summary and success=True when complete, "
-                "or success=False when blocked. "
+                "Finish this assignment with result_summary and success=True only when "
+                + ("the patch is independently verified, " if review else "the fix is complete, ")
+                + "or success=False when it must be rejected or is blocked. "
                 "Summarize actual test results, blockers and optional follow-ups."
             ),
             timeout_seconds=180,
@@ -499,18 +517,29 @@ def build_fix_agent(*, name: str = "Fix agent", workspace_root: str) -> Any:
 class _FixAgent:
     """A task adapter around the standard Strix agent, session and lifecycle."""
 
-    def __init__(self, environment: _RuntimeEnvironment) -> None:
+    def __init__(self, environment: _RuntimeEnvironment, *, review: bool = False) -> None:
         self.environment = environment
-        self.agent_id = environment.execution_id
-        self.hooks = _FixHooks(environment)
+        self.review = review
+        self.agent_id = f"{environment.execution_id}-review" if review else environment.execution_id
+        self.hooks = _FixHooks(
+            environment,
+            max_turns=environment.max_review_turns if review else environment.max_repair_turns,
+            track_environment_turns=not review,
+        )
         self.session = open_agent_session(
             self.agent_id, environment.workspace.parent / "fix-agents.db"
         )
-        self.agent = build_fix_agent(workspace_root=environment.sandbox_workspace)
+        self.agent = build_fix_agent(
+            name="Independent fix verifier" if review else "Fix agent",
+            workspace_root=environment.sandbox_workspace,
+            review=review,
+        )
         self.context = {
             "coordinator": environment.coordinator,
             "agent_id": self.agent_id,
-            "parent_id": environment.parent_id or "fix-standalone",
+            "parent_id": environment.execution_id
+            if review
+            else environment.parent_id or "fix-standalone",
             "sandbox_session": environment.session,
             "before_agent_finish": self.hooks.before_finish,
             "interactive": False,
@@ -520,12 +549,17 @@ class _FixAgent:
         start_turns = self.hooks.turns
         self.hooks.completion_digest = None
         env = self.environment
+        parent_id = env.execution_id if self.review else env.parent_id or "fix-standalone"
         await env.coordinator.register(
             self.agent_id,
             self.agent.name,
-            env.parent_id or "fix-standalone",
+            parent_id,
             skills=["fix_task"],
-            task="Implement and test the confirmed finding",
+            task=(
+                "Independently verify the prepared security fix"
+                if self.review
+                else "Implement and test the confirmed finding"
+            ),
         )
         await env.coordinator.attach_runtime(
             self.agent_id,
@@ -544,8 +578,10 @@ class _FixAgent:
                 )
             result = await run_agent_loop(
                 agent=self.agent,
-                initial_input=[] if env.resume else _untrusted_prompt_data(payload),
-                run_config=_run_config(env),
+                initial_input=[]
+                if env.resume and not self.review
+                else _untrusted_prompt_data(payload),
+                run_config=env.run_config_factory() if env.run_config_factory else _run_config(env),
                 context=self.context,
                 max_turns=remaining,
                 coordinator=env.coordinator,
@@ -629,6 +665,58 @@ class ManagedRepairAgent(_FixAgent):
         )
 
 
+class ManagedIndependentVerifier(_FixAgent):
+    def __init__(self, environment: _RuntimeEnvironment) -> None:
+        super().__init__(environment, review=True)
+
+    async def __call__(
+        self, context: PreparationContext, checks: list[CheckResult]
+    ) -> VerifierResult:
+        manifest, _, _ = await build_git_manifest(context.workspace)
+        patch = (await build_git_patch(context.workspace, manifest)).decode(errors="replace")
+        first_command = len(self.environment.repair_checks)
+        completion = await self.run(
+            {
+                "finding": _finding_assignment(context),
+                "repair": context.feedback[-1].repair.model_dump(
+                    mode="json", exclude={"command_results"}
+                )
+                if context.feedback
+                else None,
+                "repository_root": self.environment.sandbox_workspace,
+                "network_allowed": self.environment.network_allowed,
+                "diff": patch[:150_000],
+                "diff_truncated": len(patch) > 150_000,
+                "changed_files": [entry.model_dump(mode="json") for entry in manifest],
+                "requested_checks": [
+                    check.model_dump(mode="json") for check in context.request.checks
+                ],
+                "checks": [_command_preview(check, max_chars=2000) for check in checks],
+            }
+        )
+        extra_checks = self.environment.repair_checks[first_command:]
+        return VerifierResult(
+            decision=(
+                VerificationDecision.VERIFIED
+                if completion.outcome == "done"
+                else VerificationDecision.REJECTED
+            ),
+            summary=completion.summary,
+            gaps=completion.open_items,
+            notes=completion.recommendations,
+            review_basis=(
+                "execution"
+                if any(
+                    check.status is CheckStatus.PASSED and check.exit_code == 0
+                    for check in extra_checks
+                )
+                else "code_review"
+            ),
+            source_digest=self.hooks.completion_digest,
+            turns_used=completion.turns,
+        )
+
+
 async def _create_command_sandbox(
     sandbox_id: str,
 ) -> BaseSandboxSession:
@@ -646,6 +734,7 @@ async def build_fix_artifact(
     environment: _RuntimeEnvironment,
     artifact_path: Path | None,
     session: Any,
+    review_session: Any | None = None,
 ) -> tuple[list[FileManifestEntry], str, str | None]:
     manifest, summary, _ = await build_git_manifest(root)
     if artifact_path is None:
@@ -673,6 +762,11 @@ async def build_fix_artifact(
             json.dumps(
                 {
                     "repair": await session.get_items(),
+                    **(
+                        {"review": await review_session.get_items()}
+                        if review_session is not None
+                        else {}
+                    ),
                 }
             ),
         )
@@ -734,18 +828,21 @@ async def run_fix_preparation(
         return matches
 
     environment.max_repair_turns = request.repair_turn_limit
+    environment.max_review_turns = request.review_turn_limit
     environment.max_budget_usd = request.max_budget_usd
     environment.cancelled = cancelled
 
     repair = ManagedRepairAgent(environment)
+    reviewer = ManagedIndependentVerifier(environment)
     try:
         result = await prepare_fix(
             request,
             environment.workspace,
             repair=repair,
+            verify=reviewer,
             evidence_reader=environment.current_checks,
             manifest_builder=lambda root: build_fix_artifact(
-                root, environment, artifact_path, repair.session
+                root, environment, artifact_path, repair.session, reviewer.session
             ),
             source_verifier=verify_source,
             cancelled=cancelled,
@@ -753,6 +850,7 @@ async def run_fix_preparation(
         return result.model_copy(update={"cost_usd": environment.usage.total_cost})
     finally:
         await repair.close()
+        await reviewer.close()
 
 
 async def finish_native_fix(
@@ -794,16 +892,24 @@ async def finish_native_fix(
             and environment.base_commit == request.candidate.source_identity.value
         )
 
-    finished = await prepare_fix(
-        request,
-        environment.workspace,
-        repair=completed,
-        evidence_reader=environment.current_checks,
-        manifest_builder=lambda root: build_fix_artifact(root, environment, artifact_path, session),
-        source_verifier=source_matches,
-        cancelled=environment.cancelled,
-    )
-    return finished.model_copy(update={"cost_usd": environment.usage.total_cost})
+    environment.max_review_turns = request.review_turn_limit
+    reviewer = ManagedIndependentVerifier(environment)
+    try:
+        finished = await prepare_fix(
+            request,
+            environment.workspace,
+            repair=completed,
+            verify=reviewer,
+            evidence_reader=environment.current_checks,
+            manifest_builder=lambda root: build_fix_artifact(
+                root, environment, artifact_path, session, reviewer.session
+            ),
+            source_verifier=source_matches,
+            cancelled=environment.cancelled,
+        )
+        return finished.model_copy(update={"cost_usd": environment.usage.total_cost})
+    finally:
+        await reviewer.close()
 
 
 async def run_isolated_fix_preparation(
