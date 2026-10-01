@@ -30,6 +30,11 @@ account being listed in `cloud.aws_account_ids`:
 | `iam_list_principals` | list IAM users and roles | recon |
 | `iam_analyze_principal` | read a user/role's managed + inline policies, flag wildcard/admin (`*`) grants | **candidate** signal |
 | `ec2_list_open_security_groups` | inbound rules open to `0.0.0.0/0` / `::/0`, with port range | **candidate** signal |
+| `ec2_list_public_snapshots` | EBS snapshots whose `createVolumePermission` is shared with `all` | **candidate** signal |
+| `rds_list_public_instances` | DB instances with `PubliclyAccessible=True` | **candidate** signal |
+| `rds_list_public_snapshots` | manual DB snapshots whose `restore` attribute includes `all` | **candidate** signal |
+| `kms_list_keys` | list KMS keys + aliases | recon |
+| `kms_analyze_key_policy` | flag a key policy that allows a wildcard principal (`*`) with no condition | **candidate** signal |
 | `secretsmanager_list_secrets` | secret names + metadata (never values) | recon |
 
 The wrapper returns evidence; the agent files it with `create_candidate` / `create_vulnerability_report`.

@@ -187,6 +187,19 @@ argument handling, evidence shaping, tool registration, and the config. A live i
 deferred to an environment with credentials (or the managed cloud). Also to verify there: that the `mcp`
 `stdio` transport forwards the passthrough env and inherits CWD as assumed.
 
+**AWS wrapper — RDS + EBS-snapshot + KMS read-only (added, depth increment).** Five more read-only,
+scope-gated tools, same candidate framing and fake-injected tests (no creds/network), bringing the wrapper
+to **13 tools** across S3/IAM/EC2/RDS/KMS/Secrets: `rds_list_public_instances` (flags
+`PubliclyAccessible=True` DBs), `rds_list_public_snapshots` (manual snapshots whose `restore` attribute
+includes `all`), `ec2_list_public_snapshots` (EBS snapshots whose `createVolumePermission` grants the `all`
+group), `kms_list_keys` (keys + aliases recon), and `kms_analyze_key_policy` (flags an `Allow` with a
+wildcard `Principal` and **no confining `Condition`** — a conditioned cross-account grant is intentional and
+*not* flagged, mirroring the IAM analyzer's precision bias). Each is a **candidate** signal (public flag /
+shared-attribute / open key policy), never auto-promoted to a finding — validation still needs a
+demonstrated consequence per the validator semantics. `TOOL_NAMES` stays the single allowlist source, so the
+connection config picks the new tools up automatically; `README.md` tool table + `registry.py` notes
+updated. Zero upstream edits. 18 more tests in `tests/test_strix2_mcp_aws.py` (53 total).
+
 ### Baseline scan via 9Router (dogfooding) — Phase 0 pipeline verified + first self-found fix
 
 **2026-09-30.** Ran the first real end-to-end scan now that Docker is up, using the operator's local

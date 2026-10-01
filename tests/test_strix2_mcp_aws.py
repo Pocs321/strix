@@ -134,11 +134,80 @@ class _FakeIAM:
 
 
 class _FakeEC2:
-    def __init__(self, groups: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        groups: list[dict[str, Any]] | None = None,
+        *,
+        snapshots: list[dict[str, Any]] | None = None,
+        snapshot_permissions: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self._groups = groups or []
+        self._snapshots = snapshots or []
+        self._snapshot_permissions = snapshot_permissions or {}
 
     def describe_security_groups(self, **_: Any) -> dict[str, Any]:
         return {"SecurityGroups": self._groups}
+
+    def describe_snapshots(self, **_: Any) -> dict[str, Any]:
+        return {"Snapshots": self._snapshots}
+
+    def describe_snapshot_attribute(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "CreateVolumePermissions": self._snapshot_permissions.get(kwargs.get("SnapshotId"), [])
+        }
+
+
+class _FakeRDS:
+    def __init__(
+        self,
+        *,
+        instances: list[dict[str, Any]] | None = None,
+        snapshots: list[dict[str, Any]] | None = None,
+        snapshot_restore: dict[str, list[str]] | None = None,
+    ) -> None:
+        self._instances = instances or []
+        self._snapshots = snapshots or []
+        self._snapshot_restore = snapshot_restore or {}
+
+    def describe_db_instances(self, **_: Any) -> dict[str, Any]:
+        return {"DBInstances": self._instances}
+
+    def describe_db_snapshots(self, **_: Any) -> dict[str, Any]:
+        return {"DBSnapshots": self._snapshots}
+
+    def describe_db_snapshot_attributes(self, **kwargs: Any) -> dict[str, Any]:
+        values = self._snapshot_restore.get(kwargs.get("DBSnapshotIdentifier"), [])
+        return {
+            "DBSnapshotAttributesResult": {
+                "DBSnapshotAttributes": [
+                    {"AttributeName": "restore", "AttributeValues": values}
+                ]
+            }
+        }
+
+
+class _FakeKMS:
+    def __init__(
+        self,
+        *,
+        keys: list[dict[str, Any]] | None = None,
+        aliases: list[dict[str, Any]] | None = None,
+        policies: dict[str, Any] | None = None,
+    ) -> None:
+        self._keys = keys or []
+        self._aliases = aliases or []
+        self._policies = policies or {}
+
+    def list_keys(self, **_: Any) -> dict[str, Any]:
+        return {"Keys": self._keys}
+
+    def list_aliases(self, **_: Any) -> dict[str, Any]:
+        return {"Aliases": self._aliases}
+
+    def get_key_policy(self, **kwargs: Any) -> dict[str, Any]:
+        document = self._policies.get(kwargs.get("KeyId"), {"Statement": []})
+        policy = document if isinstance(document, str) else json.dumps(document)
+        return {"Policy": policy}
 
 
 class _FakeSecretsManager:
@@ -155,14 +224,26 @@ def _factory(
     s3: _FakeS3 | None = None,
     iam: _FakeIAM | None = None,
     ec2: _FakeEC2 | None = None,
+    rds: _FakeRDS | None = None,
+    kms: _FakeKMS | None = None,
     secretsmanager: _FakeSecretsManager | None = None,
 ) -> Any:
     sts = sts or _FakeSTS({"Account": _ACCOUNT, "Arn": _ARN, "UserId": "AIDA"})
     s3 = s3 or _FakeS3()
     iam = iam or _FakeIAM()
     ec2 = ec2 or _FakeEC2()
+    rds = rds or _FakeRDS()
+    kms = kms or _FakeKMS()
     secretsmanager = secretsmanager or _FakeSecretsManager()
-    clients = {"sts": sts, "s3": s3, "iam": iam, "ec2": ec2, "secretsmanager": secretsmanager}
+    clients = {
+        "sts": sts,
+        "s3": s3,
+        "iam": iam,
+        "ec2": ec2,
+        "rds": rds,
+        "kms": kms,
+        "secretsmanager": secretsmanager,
+    }
 
     def factory(service: str, _region: str | None) -> Any:
         try:
@@ -497,6 +578,175 @@ def test_secretsmanager_refused_out_of_scope() -> None:
     set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
     refused = json.loads(aws.secretsmanager_list_secrets("us-east-1"))
     assert refused["refused"] == "out_of_scope"
+
+
+# --- ec2 public snapshots ----------------------------------------------------
+
+def test_ec2_flags_public_ebs_snapshot() -> None:
+    set_active_policy(_policy())
+    ec2 = _FakeEC2(
+        snapshots=[{"SnapshotId": "snap-1", "VolumeId": "vol-1", "VolumeSize": 8}],
+        snapshot_permissions={"snap-1": [{"Group": "all"}]},
+    )
+    aws.set_client_factory(_factory(ec2=ec2))
+    body = json.loads(aws.ec2_list_public_snapshots("us-east-1"))
+    assert body["success"] is True
+    assert body["has_public_snapshots"] is True
+    assert body["public_snapshots"][0]["snapshot_id"] == "snap-1"
+
+
+def test_ec2_ignores_private_ebs_snapshot() -> None:
+    set_active_policy(_policy())
+    ec2 = _FakeEC2(
+        snapshots=[{"SnapshotId": "snap-2", "VolumeId": "vol-2"}],
+        snapshot_permissions={"snap-2": [{"UserId": "123456789012"}]},
+    )
+    aws.set_client_factory(_factory(ec2=ec2))
+    body = json.loads(aws.ec2_list_public_snapshots("us-east-1"))
+    assert body["has_public_snapshots"] is False
+
+
+def test_ec2_public_snapshots_refused_out_of_scope() -> None:
+    set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
+    assert json.loads(aws.ec2_list_public_snapshots())["refused"] == "out_of_scope"
+
+
+# --- rds public exposure -----------------------------------------------------
+
+def test_rds_flags_public_instance() -> None:
+    set_active_policy(_policy())
+    rds = _FakeRDS(
+        instances=[
+            {
+                "DBInstanceIdentifier": "prod",
+                "Engine": "postgres",
+                "PubliclyAccessible": True,
+                "Endpoint": {"Address": "prod.rds.amazonaws.com", "Port": 5432},
+                "VpcSecurityGroups": [{"VpcSecurityGroupId": "sg-1"}],
+            },
+            {"DBInstanceIdentifier": "internal", "PubliclyAccessible": False},
+        ]
+    )
+    aws.set_client_factory(_factory(rds=rds))
+    body = json.loads(aws.rds_list_public_instances("us-east-1"))
+    assert body["success"] is True
+    assert body["has_public_instances"] is True
+    assert len(body["public_instances"]) == 1
+    inst = body["public_instances"][0]
+    assert inst["db_instance_identifier"] == "prod"
+    assert inst["port"] == 5432
+    assert inst["vpc_security_groups"] == ["sg-1"]
+
+
+def test_rds_no_public_instances() -> None:
+    set_active_policy(_policy())
+    rds = _FakeRDS(instances=[{"DBInstanceIdentifier": "internal", "PubliclyAccessible": False}])
+    aws.set_client_factory(_factory(rds=rds))
+    assert json.loads(aws.rds_list_public_instances())["has_public_instances"] is False
+
+
+def test_rds_flags_public_snapshot() -> None:
+    set_active_policy(_policy())
+    rds = _FakeRDS(
+        snapshots=[
+            {"DBSnapshotIdentifier": "snap-pub", "Engine": "mysql"},
+            {"DBSnapshotIdentifier": "snap-priv", "Engine": "mysql"},
+        ],
+        snapshot_restore={"snap-pub": ["all"], "snap-priv": ["123456789012"]},
+    )
+    aws.set_client_factory(_factory(rds=rds))
+    body = json.loads(aws.rds_list_public_snapshots("us-east-1"))
+    assert body["has_public_snapshots"] is True
+    assert [s["db_snapshot_identifier"] for s in body["public_snapshots"]] == ["snap-pub"]
+
+
+def test_rds_snapshot_attribute_error_recorded() -> None:
+    class _RaisingRDS(_FakeRDS):
+        def describe_db_snapshot_attributes(self, **_: Any) -> dict[str, Any]:
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "DescribeDBSnapshotAttributes")
+
+    set_active_policy(_policy())
+    rds = _RaisingRDS(snapshots=[{"DBSnapshotIdentifier": "snap-x"}])
+    aws.set_client_factory(_factory(rds=rds))
+    body = json.loads(aws.rds_list_public_snapshots())
+    assert body["success"] is True
+    assert body["has_public_snapshots"] is False
+    assert any("snap-x" in e for e in body["errors"])
+
+
+def test_rds_refused_out_of_scope() -> None:
+    set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
+    assert json.loads(aws.rds_list_public_instances())["refused"] == "out_of_scope"
+
+
+# --- kms ---------------------------------------------------------------------
+
+_WILDCARD_KEY_POLICY = {
+    "Statement": [{"Effect": "Allow", "Principal": "*", "Action": "kms:Decrypt"}]
+}
+_WILDCARD_WITH_CONDITION = {
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {"AWS": "*"},
+            "Action": "kms:Decrypt",
+            "Condition": {"StringEquals": {"aws:PrincipalOrgID": "o-123"}},
+        }
+    ]
+}
+_SCOPED_KEY_POLICY = {
+    "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "*"}
+    ]
+}
+
+
+def test_kms_list_keys_with_aliases() -> None:
+    set_active_policy(_policy())
+    kms = _FakeKMS(
+        keys=[{"KeyId": "key-1"}, {"KeyId": "key-2"}],
+        aliases=[{"AliasName": "alias/prod", "TargetKeyId": "key-1"}],
+    )
+    aws.set_client_factory(_factory(kms=kms))
+    body = json.loads(aws.kms_list_keys("us-east-1"))
+    assert body["success"] is True
+    assert body["key_count"] == 2
+    by_id = {k["key_id"]: k for k in body["keys"]}
+    assert by_id["key-1"]["aliases"] == ["alias/prod"]
+    assert by_id["key-2"]["aliases"] == []
+
+
+def test_kms_flags_wildcard_principal_policy() -> None:
+    set_active_policy(_policy())
+    kms = _FakeKMS(policies={"key-1": _WILDCARD_KEY_POLICY})
+    aws.set_client_factory(_factory(kms=kms))
+    body = json.loads(aws.kms_analyze_key_policy("key-1", "us-east-1"))
+    assert body["externally_exposed"] is True
+    assert body["concerning_statements"][0]["principal_wildcard"] is True
+
+
+def test_kms_wildcard_with_condition_not_flagged() -> None:
+    set_active_policy(_policy())
+    kms = _FakeKMS(policies={"key-1": _WILDCARD_WITH_CONDITION})
+    aws.set_client_factory(_factory(kms=kms))
+    assert json.loads(aws.kms_analyze_key_policy("key-1"))["externally_exposed"] is False
+
+
+def test_kms_scoped_policy_not_flagged() -> None:
+    set_active_policy(_policy())
+    kms = _FakeKMS(policies={"key-1": _SCOPED_KEY_POLICY})
+    aws.set_client_factory(_factory(kms=kms))
+    assert json.loads(aws.kms_analyze_key_policy("key-1"))["externally_exposed"] is False
+
+
+def test_kms_analyze_requires_key_id() -> None:
+    set_active_policy(_policy())
+    assert json.loads(aws.kms_analyze_key_policy(""))["success"] is False
+
+
+def test_kms_refused_out_of_scope() -> None:
+    set_active_policy(_policy(cloud={"aws_account_ids": ["999999999999"]}))
+    assert json.loads(aws.kms_list_keys())["refused"] == "out_of_scope"
 
 
 # --- auto-wire (applicable_builtin_configs / configs_with_builtins) -----------

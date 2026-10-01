@@ -66,11 +66,12 @@ def aws_wrapper_config(
         allowed_tools=list(aws.TOOL_NAMES),
         active_tools=list(aws.TOOL_NAMES),
         notes=(
-            "Host-side AWS read-only checks (STS identity, S3 recon + bounded object "
-            "read), scope-gated on cloud.aws_account_ids and fail-closed without a "
-            "scope.yaml. Credentials stay on the host. Read-only: use results to file "
-            "candidates (s3_get_bucket_public_status) and validated findings "
-            "(s3_get_object_head)."
+            "Host-side AWS read-only checks across S3, IAM, EC2, RDS, KMS and Secrets "
+            "Manager (identity/recon, public-exposure signals, bounded object read), "
+            "scope-gated on cloud.aws_account_ids and fail-closed without a scope.yaml. "
+            "Credentials stay on the host. Read-only: use results to file candidates "
+            "(e.g. s3_get_bucket_public_status, rds_list_public_instances, "
+            "kms_analyze_key_policy) and validated findings (s3_get_object_head)."
         ),
         session_timeout_seconds=120.0,
     )

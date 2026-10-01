@@ -55,7 +55,12 @@ TOOL_NAMES = (
     "iam_list_principals",
     "iam_analyze_principal",
     "ec2_list_open_security_groups",
+    "ec2_list_public_snapshots",
     "secretsmanager_list_secrets",
+    "rds_list_public_instances",
+    "rds_list_public_snapshots",
+    "kms_list_keys",
+    "kms_analyze_key_policy",
 )
 
 _INSTRUCTIONS = (
@@ -65,7 +70,11 @@ _INSTRUCTIONS = (
     "bounded read that validates it. IAM: iam_list_principals for recon, "
     "iam_analyze_principal flags over-permissive (wildcard/admin) policies as a "
     "candidate. EC2: ec2_list_open_security_groups flags inbound rules open to "
-    "0.0.0.0/0 (candidate). Secrets Manager: secretsmanager_list_secrets enumerates "
+    "0.0.0.0/0, ec2_list_public_snapshots flags EBS snapshots shared publicly "
+    "(candidates). RDS: rds_list_public_instances flags publicly-accessible DBs, "
+    "rds_list_public_snapshots flags snapshots restorable by all (candidates). KMS: "
+    "kms_list_keys for recon, kms_analyze_key_policy flags a wildcard-principal key "
+    "policy (candidate). Secrets Manager: secretsmanager_list_secrets enumerates "
     "secret names/metadata (never values). All regional tools take an optional "
     "region. No state-changing actions."
 )
@@ -569,6 +578,291 @@ def secretsmanager_list_secrets(region: str | None = None) -> str:
     )
 
 
+def _snapshot_create_volume_groups(attribute: dict[str, Any]) -> list[str]:
+    """Return the groups an EBS snapshot's createVolumePermission is shared with."""
+    return [
+        str(perm.get("Group") or "")
+        for perm in _as_list(attribute.get("CreateVolumePermissions"))
+        if perm.get("Group")
+    ]
+
+
+def ec2_list_public_snapshots(region: str | None = None) -> str:
+    """List EBS snapshots owned by the account that are shared publicly. Read-only.
+
+    For each snapshot the account owns, reads its ``createVolumePermission``
+    attribute; a snapshot whose permissions grant the ``all`` group is public and a
+    **candidate** (file it with create_candidate) — a public EBS snapshot can expose
+    whole-disk contents. Validate by demonstrating a volume created/read from it as
+    an unrelated principal, not the permission alone. Refused if the caller's account
+    is not in scope.
+
+    Args:
+        region: AWS region to inspect (e.g. ``us-east-1``). Snapshots are regional.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    ec2 = _client("ec2", region)
+    try:
+        snapshots = ec2.describe_snapshots(OwnerIds=["self"]).get("Snapshots", [])
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"ec2 describe_snapshots failed: {exc}", account=account, region=region)
+
+    public: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for snap in snapshots:
+        snap_id = str(snap.get("SnapshotId") or "")
+        try:
+            attribute = ec2.describe_snapshot_attribute(
+                SnapshotId=snap_id, Attribute="createVolumePermission"
+            )
+        except (BotoCoreError, ClientError) as exc:
+            errors.append(f"{snap_id}: {exc}")
+            continue
+        groups = _snapshot_create_volume_groups(attribute)
+        if "all" in groups:
+            public.append(
+                {
+                    "snapshot_id": snap_id,
+                    "volume_id": str(snap.get("VolumeId") or ""),
+                    "volume_size": snap.get("VolumeSize"),
+                    "groups": groups,
+                }
+            )
+    return ok(
+        account=account,
+        region=region,
+        has_public_snapshots=bool(public),
+        public_snapshots=public,
+        errors=errors,
+        note="Candidate signal only. A public EBS snapshot can expose disk contents.",
+    )
+
+
+def rds_list_public_instances(region: str | None = None) -> str:
+    """List RDS DB instances reachable from the public internet. Read-only.
+
+    Flags instances with ``PubliclyAccessible=True`` — a publicly reachable managed
+    database is a **candidate** (file it with create_candidate); validate by
+    demonstrating an actually reachable/authenticating endpoint, not the flag alone
+    (a public instance behind a closed security group is not yet exposed). Refused if
+    the caller's account is not in scope.
+
+    Args:
+        region: AWS region to inspect (e.g. ``us-east-1``). RDS is regional.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    try:
+        instances = _client("rds", region).describe_db_instances().get("DBInstances", [])
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"rds describe_db_instances failed: {exc}", account=account, region=region)
+
+    public = [
+        {
+            "db_instance_identifier": str(db.get("DBInstanceIdentifier") or ""),
+            "engine": str(db.get("Engine") or ""),
+            "endpoint": (db.get("Endpoint") or {}).get("Address"),
+            "port": (db.get("Endpoint") or {}).get("Port"),
+            "vpc_security_groups": [
+                str(group.get("VpcSecurityGroupId") or "")
+                for group in _as_list(db.get("VpcSecurityGroups"))
+            ],
+        }
+        for db in instances
+        if db.get("PubliclyAccessible") is True
+    ]
+    return ok(
+        account=account,
+        region=region,
+        has_public_instances=bool(public),
+        public_instances=public,
+        note=(
+            "Candidate signal only. Confirm the endpoint is actually reachable "
+            "(security group + route) to validate."
+        ),
+    )
+
+
+def _snapshot_restore_values(attributes: dict[str, Any]) -> list[str]:
+    """Return an RDS snapshot's ``restore`` attribute values (who may restore it)."""
+    result = attributes.get("DBSnapshotAttributesResult", {})
+    for attribute in _as_list(result.get("DBSnapshotAttributes")):
+        if attribute.get("AttributeName") == "restore":
+            return [str(value) for value in _as_list(attribute.get("AttributeValues"))]
+    return []
+
+
+def rds_list_public_snapshots(region: str | None = None) -> str:
+    """List manual RDS snapshots shared publicly (restorable by all). Read-only.
+
+    Enumerates the account's manual DB snapshots and reads each one's ``restore``
+    attribute; a snapshot whose restore list includes ``all`` is public and a
+    **candidate** (file it with create_candidate) — a public DB snapshot can leak an
+    entire database. Validate by demonstrating a restore/read as an unrelated
+    principal. Refused if the caller's account is not in scope.
+
+    Args:
+        region: AWS region to inspect (e.g. ``us-east-1``). Snapshots are regional.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    rds = _client("rds", region)
+    try:
+        snapshots = rds.describe_db_snapshots(SnapshotType="manual").get("DBSnapshots", [])
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"rds describe_db_snapshots failed: {exc}", account=account, region=region)
+
+    public: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for snap in snapshots:
+        snap_id = str(snap.get("DBSnapshotIdentifier") or "")
+        try:
+            attributes = rds.describe_db_snapshot_attributes(DBSnapshotIdentifier=snap_id)
+        except (BotoCoreError, ClientError) as exc:
+            errors.append(f"{snap_id}: {exc}")
+            continue
+        restore = _snapshot_restore_values(attributes)
+        if "all" in restore:
+            public.append(
+                {
+                    "db_snapshot_identifier": snap_id,
+                    "engine": str(snap.get("Engine") or ""),
+                    "restore": restore,
+                }
+            )
+    return ok(
+        account=account,
+        region=region,
+        has_public_snapshots=bool(public),
+        public_snapshots=public,
+        errors=errors,
+        note="Candidate signal only. A public DB snapshot can expose an entire database.",
+    )
+
+
+def kms_list_keys(region: str | None = None) -> str:
+    """List KMS keys and their aliases in the acting account. Read-only recon.
+
+    Each key is a lead to triage with kms_analyze_key_policy, not a finding. Refused
+    if the caller's account is not in scope.
+
+    Args:
+        region: AWS region to inspect (e.g. ``us-east-1``). KMS keys are regional.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    kms = _client("kms", region)
+    try:
+        keys = kms.list_keys().get("Keys", [])
+        aliases = kms.list_aliases().get("Aliases", [])
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"kms list keys/aliases failed: {exc}", account=account, region=region)
+
+    alias_by_key: dict[str, list[str]] = {}
+    for alias in aliases:
+        target = str(alias.get("TargetKeyId") or "")
+        if target:
+            alias_by_key.setdefault(target, []).append(str(alias.get("AliasName") or ""))
+    key_list = [
+        {
+            "key_id": str(key.get("KeyId") or ""),
+            "aliases": alias_by_key.get(str(key.get("KeyId") or ""), []),
+        }
+        for key in keys
+    ]
+    return ok(
+        account=account,
+        region=region,
+        key_count=len(key_list),
+        keys=key_list,
+        note="Recon/candidate signal. Analyze a key's policy with kms_analyze_key_policy.",
+    )
+
+
+def _kms_wildcard_principal_statements(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flag KMS key-policy statements exposing the key to any AWS principal.
+
+    Concerning = an ``Allow`` whose ``Principal`` is the wildcard ``"*"`` (or
+    ``{"AWS": "*"}``) with no ``Condition`` confining it — the key is usable by any
+    principal. A confining ``Condition`` (an org id / source account / etc.) makes it
+    a deliberate cross-account grant, so those are not flagged.
+    """
+    flagged: list[dict[str, Any]] = []
+    for statement in _as_list(document.get("Statement")):
+        if not isinstance(statement, dict) or statement.get("Effect") != "Allow":
+            continue
+        principal = statement.get("Principal")
+        values: list[str] = []
+        if isinstance(principal, str):
+            values = [principal]
+        elif isinstance(principal, dict):
+            for entry in principal.values():
+                values.extend(str(value) for value in _as_list(entry))
+        if "*" not in values or statement.get("Condition"):
+            continue
+        flagged.append(
+            {
+                "sid": str(statement.get("Sid") or ""),
+                "actions": [str(action) for action in _as_list(statement.get("Action"))],
+                "principal_wildcard": True,
+            }
+        )
+    return flagged
+
+
+def kms_analyze_key_policy(key_id: str, region: str | None = None) -> str:
+    """Analyze a KMS key policy for a wildcard-principal (any-account) grant. Read-only.
+
+    Reads the key's default key policy and flags ``Allow`` statements open to any
+    principal (``Principal: "*"``) with no confining condition — an externally-usable
+    CMK is a **candidate** (file it with create_candidate); validate by demonstrating
+    use of the key from an unrelated principal before filing a finding. Refused if
+    the caller's account is not in scope.
+
+    Args:
+        key_id: The KMS key id or ARN.
+        region: AWS region (e.g. ``us-east-1``). KMS keys are regional.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    account, _arn, denial = _authorize()
+    if denial is not None:
+        return denial
+    if not (key_id or "").strip():
+        return error("key_id is required")
+    try:
+        policy = _client("kms", region).get_key_policy(KeyId=key_id, PolicyName="default")
+    except (BotoCoreError, ClientError) as exc:
+        return error(f"kms get_key_policy failed: {exc}", account=account, key_id=key_id)
+
+    document = _coerce_policy_document(policy.get("Policy"))
+    concerning = _kms_wildcard_principal_statements(document)
+    return ok(
+        account=account,
+        region=region,
+        key_id=key_id,
+        externally_exposed=bool(concerning),
+        concerning_statements=concerning,
+        note=(
+            "Candidate signal only (wildcard-principal KMS key policy). Validate by "
+            "demonstrating key use from an unrelated principal before filing a finding."
+        ),
+    )
+
+
 def build() -> FastMCP:
     """Build the AWS wrapper server with its read-only tools registered."""
     server = build_server("strix-aws", _INSTRUCTIONS)
@@ -579,7 +873,12 @@ def build() -> FastMCP:
     server.tool()(iam_list_principals)
     server.tool()(iam_analyze_principal)
     server.tool()(ec2_list_open_security_groups)
+    server.tool()(ec2_list_public_snapshots)
     server.tool()(secretsmanager_list_secrets)
+    server.tool()(rds_list_public_instances)
+    server.tool()(rds_list_public_snapshots)
+    server.tool()(kms_list_keys)
+    server.tool()(kms_analyze_key_policy)
     return server
 
 
