@@ -167,6 +167,15 @@ and never when `STRIX2_AUTO_WRAPPERS` is falsey. Scope is loaded first (`install
 `runner.py:231`) so the policy is available when requests are built. The SaaS/pro path
 (`mcp_connection_requests`) is untouched. Tests in `tests/test_strix2_mcp_aws.py`.
 
+**Template fix (found via the Linux CI baseline, 2026-10-01).** The shipped `scope.yaml` template had
+`cloud.aws_account_ids: ["123456789012"]` populated, so *every* run started from the repo root auto-attached
+the AWS wrapper — which leaked into the upstream runner tests (`test_runner_mcp`, `test_runner_root_prompt`)
+as an unexpected `mcp_available: True`. These had failed silently since Phase 1: the CI blocking job runs only
+`test_strix2_*`, and the upstream pytest baseline never ran because the full-repo ruff step exited first (now
+`continue-on-error`). Fix: ship the template with `aws_account_ids: []` (example moved to a comment), matching
+the auto-wire's documented "only when the scope authorizes an AWS account" intent — a template should not
+silently arm a cloud wrapper. No product-code change; the strix2 tests set their own policy and are unaffected.
+
 **AWS wrapper — IAM read-only (added).** `iam_list_principals` (users/roles recon) and
 `iam_analyze_principal(name, principal_type)` — reads a principal's attached managed + inline policies and
 flags over-permissive `Allow` statements (a full action wildcard `*`, or a service wildcard like `s3:*` on
