@@ -90,6 +90,12 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Ruff lint (full repo)
+        # Informational only, and must NOT gate the pytest step below it: upstream
+        # carries a newer-ruff unused-noqa (it lints via a pre-commit-pinned ruff,
+        # older than this dev-dep ruff) that is not ours to fix. Without this, that
+        # one lint error exits the step non-zero and the full pytest baseline never
+        # runs on Linux. The Strix 2 code is still strictly gated by the blocking job.
+        continue-on-error: true
         run: uv run ruff check .
 
       - name: Full pytest suite
