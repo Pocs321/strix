@@ -34,7 +34,8 @@ from strix.core.execution import (
 from strix.core.execution import (
     spawn_child_agent as start_child_agent,
 )
-from strix.core.hooks import BudgetExceededError, ReportUsageHooks, recomputed_budget_flags
+from strix.core.hooks import BudgetExceededError, recomputed_budget_flags
+from strix.guard.hooks import build_run_hooks
 from strix.core.inputs import (
     build_root_task,
     build_scan_targets,
@@ -368,7 +369,11 @@ async def run_strix_scan(
             # error: hand it back as a tool result so the agent can correct itself.
             tool_not_found_behavior="return_error_to_model",
         )
-        hooks = ReportUsageHooks(
+        # Strix 2: build_run_hooks returns the usual ReportUsageHooks, or — when
+        # STRIX2_PROGRESS_GUARD is set — a subclass that also injects an advisory
+        # cross-turn no-progress nudge. Same type + extend_budget either way, so the
+        # budget/turn behavior and the line below are unchanged when the guard is off.
+        hooks = build_run_hooks(
             model=resolved_model,
             max_budget_usd=max_budget_usd,
             max_turns=max_turns,

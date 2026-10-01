@@ -25,6 +25,7 @@ decides where to push (creating a GitHub fork is an outward action — deferred 
 | `strix/agents/factory.py` | +1 import; `_wrap_exec_command` calls `enforce_shell_command(command)` before dispatch and returns a refusal string if out of scope | Enforce `scope.yaml` at the shell boundary for network-reaching in-sandbox CLIs (defense-in-depth, mirrors the `call_mcp` check). No-op without a policy or for non-network commands, so upstream behavior is unchanged. | 3 |
 | `strix/agents/prompt.py` | `_resolve_skills` appends `coordination/strix2_domains` for the root agent (+docstring) | Load Strix 2's domain-delegation guidance into the root system prompt. The template already renders every loaded skill via a generic loop, so no template edit is needed; a logged skip if `skills2` isn't registered, so upstream is unchanged. | 3 |
 | `strix/agents/factory.py` | +1 import; `SandboxAgent(model=…)` now `resolve_agent_model(skills, is_root=is_root)` instead of `None` | Per-role model routing (Phase 5). Returns `None` unless `STRIX2_ROUTER` is enabled → the SDK uses the global provider default, so behavior is unchanged by default. | 5 |
+| `strix/core/runner.py` | `hooks = ReportUsageHooks(...)` → `hooks = build_run_hooks(...)` (swap constructor; import `build_run_hooks`, drop the now-unused `ReportUsageHooks` import) | Wire the opt-in no-progress guard into the SDK run-hooks lifecycle. `build_run_hooks` returns a plain `ReportUsageHooks` unless `STRIX2_PROGRESS_GUARD` is set, and the guard is a subclass, so the return type, `extend_budget`, and all budget/turn behavior are unchanged when the guard is off (3rd runner edit). | 5 |
 
 > As of Phase 0, **zero upstream files edited.** All Phase 0 additions are new files
 > (`docs/strix2/*`, `scope.yaml`, `strix/scope/*`, `.github/workflows/ci.yml`, `THIRD_PARTY.md`,
@@ -359,9 +360,23 @@ existing per-turn cap and budget/turn ceilings without rebuilding them.
 Tests: `tests/test_strix2_router.py` (role classification, selection, resolution, env config, both stall
 signals, reset). CI gate extended to `strix/router` + `strix/guard`.
 
-**Not yet:** wiring `NoProgressDetector` into the turn loop (`core/execution.py`) to actually warn/stop a
-stalled agent, and cross-run recon caching (keyed by target+tool) — both need integration into the run loop
-and are deferred as their own increments.
+**No-progress guard wired in (done, opt-in).** `NoProgressDetector` is now driven through the SDK
+**run-hooks lifecycle** rather than the raw turn loop — the cleaner seam. `strix/guard/hooks.py` adds
+`ProgressGuardHooks(ReportUsageHooks)`: `on_tool_start` feeds one detector per agent (keyed by `agent_id`,
+since a single hooks instance is shared across every agent in a scan), fingerprinting on the tool **name**
+(the SDK's `on_tool_start` does not expose call arguments); on a stall signal it injects an escalating
+**advisory** message on the agent's next `on_llm_start` by appending to `input_items` — the exact mechanism
+`ReportUsageHooks` already uses for budget/turn warnings. It is **advisory only** (never force-stops; the
+turn/budget ceilings stay the hard stops) and self-limiting (`max_nudges` per agent, re-arming once per
+stall) so the guard can never itself loop. `build_run_hooks(...)` returns the plain hooks unless
+`STRIX2_PROGRESS_GUARD` is set (`STRIX2_PROGRESS_REPEAT` / `STRIX2_PROGRESS_MAX_NUDGES` tune it), wired via
+the one logged `runner.py` swap above — so default behavior is unchanged. Tests:
+`tests/test_strix2_progress_guard_hooks.py` (10: factory opt-in, threshold, alternating-tools negative,
+per-agent isolation, cap, re-arm, final-nudge wrap-up advice, best-effort robustness).
+
+**Not yet:** cross-run recon caching (keyed by target+tool) — still needs the run loop / a cache store and
+is deferred as its own increment; the native in-sandbox CLI tools remain deferred on the SDK sandbox seam
+(Phase 3).
 
 ## Phase 6 — evaluation lab + honest metrics (started)
 
