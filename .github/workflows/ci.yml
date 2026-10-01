@@ -45,10 +45,10 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Ruff lint (Strix 2 code)
-        run: uv run ruff check strix/scope strix/tools/scope strix/candidates strix/tools/candidates strix/findings2 strix/tools/findings2 strix/strix2_ext.py tests/test_strix2_*.py
+        run: uv run ruff check strix/scope strix/tools/scope strix/candidates strix/tools/candidates strix/findings2 strix/tools/findings2 strix/router strix/guard strix/cache strix/tools/cache strix/eval strix/strix2_ext.py tests/test_strix2_*.py
 
       - name: Mypy (Strix 2 code)
-        run: uv run mypy strix/scope strix/tools/scope strix/candidates strix/tools/candidates strix/findings2 strix/tools/findings2 strix/strix2_ext.py
+        run: uv run mypy strix/scope strix/tools/scope strix/candidates strix/tools/candidates strix/findings2 strix/tools/findings2 strix/router strix/guard strix/cache strix/tools/cache strix/eval strix/strix2_ext.py
 
       - name: Strix 2 import smoke test
         run: uv run python -c "import strix; import strix.scope; from strix.scope import load_scope_policy, ScopePolicy; print('strix + strix.scope import OK')"
