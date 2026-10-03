@@ -514,3 +514,18 @@ REST API like H1's, so the reliable Bugcrowd path is the **offline file** (`--bo
 **Not yet:** pull disclosures (Hacktivity/Crowdstream) live rather than from a file; auto-derive a start target
 from the first in-scope asset. A live end-to-end bounty run also needs Docker + the LLM gateway — same
 prerequisites as any scan.
+
+**HTTP ROE enforcement (2026-10-03) — required header + rate cap.** Some programs require an identifying
+header on every request (HackerOne's `X-Bug-Bounty: HackerOne-<username>` convention) and cap the request
+rate; previously these were advisory in the briefing only. Now `RulesOfEngagement` carries
+`required_headers: dict[str,str]`, `bootstrap._derive_http_roe` auto-extracts the `X-Bug-Bounty` header
+(substituting the hunter's real username for the policy's placeholder) and an `N per second` rate from the
+free-text policy (gaps only — an explicit ROE file wins), and `strix/bounty/compliance.py` enforces them at
+the two chokepoints the engine owns: (1) the `exec_command` shell gate (wired in `agents/factory.py` right
+after the scope gate) **refuses** an HTTP CLI (curl/httpx/nuclei/ffuf/sqlmap/…) that targets a host but omits
+a required header, or a high-volume fuzzer with no rate flag, naming the exact flag to add; (2) the Caido
+`repeat_request` replay tool is wrapped (also in `factory.py`) to **inject** the required headers into every
+replay. Pure browser navigation is not force-injected (recon, not active testing) — the agent is told to set
+it there. Verified live against `neon_bbp`: bootstrap derived `X-Bug-Bounty: HackerOne-<user>` + 10 rps and
+both appear in the agent constraint block. Upstream edit: `agents/factory.py` (import + one guarded exec-gate
+call + the `repeat_request` wrapper + one wiring branch). 14 tests in `test_strix2_bounty_compliance.py`.

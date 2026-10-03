@@ -52,6 +52,8 @@ def _status_payload() -> dict[str, Any]:
         "rules_of_engagement": {
             "mode": gate.mode,
             "active_tools_allowed": gate.active_tools_allowed,
+            "rate_limit_rps": program.roe.rate_limit_rps,
+            "required_headers": program.roe.required_headers,
             "constraints": gate.constraints,
         },
         "known_report_count": len(known.reports) if known is not None else 0,

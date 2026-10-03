@@ -15,8 +15,10 @@ Two halves, mirroring how scope wiring works (flag → env → load at run start
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -67,6 +69,36 @@ class BootstrapResult:
 
 def _bounty_dir(program: BountyProgram) -> Path:
     return Path.home() / ".strix" / "bounty" / program.slug
+
+
+_H1_HEADER_RE = re.compile(r"x-bug-bounty", re.IGNORECASE)
+_RATE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:requests?\s*)?(?:per\s*second|/\s*s\b|req/s|rps)", re.IGNORECASE
+)
+
+
+def _derive_http_roe(program: BountyProgram, *, username: str | None) -> BountyProgram:
+    """Fill in machine-readable HTTP ROE from the free-text policy (gaps only).
+
+    Detects the HackerOne ``X-Bug-Bounty: HackerOne-<username>`` identifying-header
+    convention (substituting the hunter's real username for the policy's placeholder)
+    and a ``N per second`` rate cap. Only fills values the program/ROE file left unset,
+    so an explicit ROE override always wins.
+    """
+    roe = program.roe
+    policy = roe.notes or ""
+    updates: dict[str, object] = {}
+    if not roe.required_headers and _H1_HEADER_RE.search(policy):
+        uname = username or "<your-hackerone-username>"
+        updates["required_headers"] = {"X-Bug-Bounty": f"HackerOne-{uname}"}
+    if roe.rate_limit_rps is None:
+        m = _RATE_RE.search(policy)
+        if m:
+            with contextlib.suppress(ValueError):
+                updates["rate_limit_rps"] = float(m.group(1))
+    if not updates:
+        return program
+    return program.model_copy(update={"roe": roe.model_copy(update=updates)})
 
 
 def _build_preamble(program: BountyProgram, gate: RoeGate) -> str:
@@ -120,6 +152,7 @@ def bootstrap_bounty(
     except BountyLoadError as exc:
         raise BountyBootstrapError(str(exc)) from exc
 
+    program = _derive_http_roe(program, username=os.environ.get("HACKERONE_API_USERNAME"))
     gate = evaluate_roe(program, automated_policy=automated_policy)
     compiled = compile_to_scope(program, intrusive_policy=intrusive_policy)
 

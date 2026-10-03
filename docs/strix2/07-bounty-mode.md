@@ -95,6 +95,17 @@ treating anything as submittable — call `check_duplicate` to rank it against t
 (likely / possible / novel). Findings follow the two-tier discipline (a scanner signal is a *candidate*; a
 demonstrated impact with captured I/O is a *validated finding*).
 
+### Rules enforced at the tool boundary
+When a program requires an identifying header or caps the request rate, bounty mode does more than tell the
+agent — it enforces it:
+- **Required header** (e.g. HackerOne's `X-Bug-Bounty: HackerOne-<username>`) is auto-derived from the policy
+  (your real username is substituted for the policy's placeholder) or set via `--bounty-roe`. The
+  `exec_command` gate **refuses** an HTTP CLI that targets a host without it, and the Caido `repeat_request`
+  replay path **injects** it automatically.
+- **Rate cap** (e.g. `10 per second`) is auto-derived too; a high-volume fuzzer (nuclei/ffuf/…) run without a
+  rate flag is **refused** with the exact flag to add.
+- Pure browser navigation is not force-injected (it is recon) — set the header there per the briefing.
+
 ## 5. Outputs — `strix_runs/<run>/bounty/`
 
 - `program.json` — the compiled program (scope + rules).

@@ -69,7 +69,13 @@ def _base_constraints(program: BountyProgram) -> list[str]:
     if roe.rate_limit_rps is not None:
         out.append(
             f"Respect the program rate limit of {roe.rate_limit_rps} request(s)/second; "
-            "throttle scans and avoid bursts."
+            "throttle scans and avoid bursts (the engine refuses fuzzers with no rate flag)."
+        )
+    if roe.required_headers:
+        hdrs = ", ".join(f"{k}: {v}" for k, v in roe.required_headers.items())
+        out.append(
+            f"Set the required identifying header(s) on EVERY request: {hdrs}. The engine "
+            "refuses HTTP tool calls that omit them and injects them into proxy replays."
         )
     if roe.prohibited_actions:
         out.append(

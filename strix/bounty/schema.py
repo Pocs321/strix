@@ -80,6 +80,7 @@ class RulesOfEngagement(BaseModel):
     automated_testing_allowed: bool | None = None
     state_changing_poc_allowed: bool = False
     rate_limit_rps: float | None = None
+    required_headers: dict[str, str] = {}
     prohibited_actions: list[str] = []
     eligible_vuln_types: list[str] = []
     ineligible_vuln_types: list[str] = []

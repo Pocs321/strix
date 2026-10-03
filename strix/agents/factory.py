@@ -17,6 +17,7 @@ from agents.tool import CustomTool, FunctionTool, Tool
 from pydantic import ValidationError
 
 from strix.agents.prompt import render_system_prompt
+from strix.bounty.compliance import enforce_bounty_http, required_headers_for_run
 from strix.config import load_settings
 from strix.router import resolve_agent_model
 from strix.scope.enforcement import enforce_shell_command
@@ -454,6 +455,12 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
                 denial = enforce_shell_command(command)
                 if denial is not None:
                     return f"Refused (out of scope): {denial.reason}"
+                # Strix 2 bounty mode: enforce the program's HTTP rules of engagement
+                # (required identifying header, request-rate cap). No-op outside a
+                # bounty run or for a compliant command.
+                roe_reason = enforce_bounty_http(command)
+                if roe_reason is not None:
+                    return f"Refused (bounty ROE): {roe_reason}"
             raw_input = json.dumps(parsed)
         try:
             return await invoke_tool(ctx, raw_input)
@@ -466,6 +473,39 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
                 "(or omitted to use the turn's cwd). "
                 f"Got: {rel!r}."
             )
+
+    tool.on_invoke_tool = invoke
+    return tool
+
+
+def _wrap_repeat_request(tool: FunctionTool) -> FunctionTool:
+    """Inject the bounty run's required headers into every proxy replay.
+
+    A program that requires an identifying header (e.g. ``X-Bug-Bounty``) needs it on
+    the Caido ``repeat_request`` path too, not just on sandbox CLIs. No-op outside a
+    bounty run that bound required headers.
+    """
+    invoke_tool = tool.on_invoke_tool
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        headers = required_headers_for_run()
+        if headers:
+            try:
+                parsed = json.loads(raw_input)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                mods = parsed.get("modifications")
+                if not isinstance(mods, dict):
+                    mods = {}
+                existing = mods.get("headers")
+                if not isinstance(existing, dict):
+                    existing = {}
+                existing.update(headers)  # ROE headers win — they must be exact
+                mods["headers"] = existing
+                parsed["modifications"] = mods
+                raw_input = json.dumps(parsed)
+        return await invoke_tool(ctx, raw_input)
 
     tool.on_invoke_tool = invoke
     return tool
@@ -502,6 +542,8 @@ def _configure_shell_tools(
         wrapped = _with_strictness(_with_coerced_arguments(tool), strict_schemas)
         if tool.name == "exec_command":
             wrapped = _wrap_exec_command(wrapped)
+        elif tool.name == "repeat_request":
+            wrapped = _wrap_repeat_request(wrapped)
         elif tool.name == "write_stdin":
             wrapped = _wrap_write_stdin(wrapped)
         if chat_completions:
