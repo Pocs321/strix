@@ -29,6 +29,7 @@ from strix.scope.loader import (
 from strix.scope.schema import (
     ApiScope,
     CloudScope,
+    ExclusionScope,
     NetworkScope,
     ScopeDecision,
     ScopePolicy,
@@ -40,6 +41,7 @@ __all__ = [
     "DEFAULT_SCOPE_FILENAMES",
     "ApiScope",
     "CloudScope",
+    "ExclusionScope",
     "NetworkScope",
     "ScopeConfigError",
     "ScopeDecision",

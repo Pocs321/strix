@@ -150,11 +150,37 @@ class CloudScope(BaseModel):
         return value
 
 
+class ExclusionScope(BaseModel):
+    """Explicit out-of-scope entries, denied even when an in-scope rule matches.
+
+    This is the deny channel the allowlist model otherwise lacks: a wildcard scope
+    such as ``*.example.com`` can carve out a specific host (``admin.example.com``)
+    or path (``https://example.com/billing``) — the pattern bug-bounty programs use
+    when a broad wildcard is in scope but a few assets are off-limits. ``hosts``
+    accepts an exact host or a ``*.`` wildcard, ``urls`` are path-aware prefixes, and
+    ``cidrs`` are IP ranges. All are checked before any allow rule: deny wins.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    hosts: list[str] = []
+    urls: list[str] = []
+    cidrs: list[str] = []
+
+    @field_validator("cidrs")
+    @classmethod
+    def _validate_cidrs(cls, value: list[str]) -> list[str]:
+        for cidr in value:
+            ipaddress.ip_network(cidr, strict=False)  # raises ValueError on garbage
+        return value
+
+
 class ScopePolicy(BaseModel):
     """The full authorized-scope policy loaded from ``scope.yaml``.
 
     Metadata (``name``, ``authorized_by``, ``notes``) is for the record and the
-    report header; the domain sections drive :meth:`evaluate`.
+    report header; the domain sections drive :meth:`evaluate`. ``exclusions`` are
+    denied first, so they override any in-scope match.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -169,6 +195,7 @@ class ScopePolicy(BaseModel):
     api: ApiScope = ApiScope()
     network: NetworkScope = NetworkScope()
     cloud: CloudScope = CloudScope()
+    exclusions: ExclusionScope = ExclusionScope()
 
     # ---- evaluation ------------------------------------------------------
 
@@ -191,11 +218,60 @@ class ScopePolicy(BaseModel):
             )
 
         kind = self._classify(raw)
+        excluded = self._check_exclusions(raw, kind)
+        if excluded is not None:
+            return excluded
         if kind == "cloud":
             return self._check_cloud(raw)
         if kind in ("web", "api"):
             return self._check_url(raw)
         return self._check_network(raw)
+
+    # ---- exclusions (deny-first) ----------------------------------------
+
+    def _check_exclusions(self, target: str, kind: TargetKind) -> ScopeDecision | None:
+        """Deny a target that matches an explicit out-of-scope exclusion.
+
+        Checked before any allow rule so a carve-out beats a broad wildcard. Cloud
+        targets have no exclusion channel — account allowlisting is the control
+        there — so they are left to :meth:`_check_cloud`.
+        """
+        excl = self.exclusions
+        if kind == "cloud" or not (excl.hosts or excl.urls or excl.cidrs):
+            return None
+
+        for url in excl.urls:
+            if _url_prefix_matches(target, url):
+                return ScopeDecision.deny(
+                    f"explicitly out of scope (exclusion url {url!r})", kind, "exclusion", url
+                )
+
+        if "://" in target:
+            host = urlsplit(target).hostname or ""
+        else:
+            host = _norm_host(target.split("/", 1)[0])
+        if not host:
+            return None
+
+        for pattern in excl.hosts:
+            if _host_matches(host, pattern):
+                return ScopeDecision.deny(
+                    f"explicitly out of scope (exclusion host {pattern!r})",
+                    kind,
+                    "exclusion",
+                    pattern,
+                )
+        ip = _as_ip(host)
+        if ip is not None:
+            for cidr in excl.cidrs:
+                if ip in ipaddress.ip_network(cidr, strict=False):
+                    return ScopeDecision.deny(
+                        f"explicitly out of scope (exclusion CIDR {cidr})",
+                        kind,
+                        "exclusion",
+                        cidr,
+                    )
+        return None
 
     # ---- classification --------------------------------------------------
 

@@ -897,6 +897,16 @@ class ReportState:
         except Exception:
             logger.exception("SARIF emit failed (non-fatal; CSV/MD unaffected)")
 
+        # Strix 2 bounty mode: write submission-ready artifacts (program, dedupe,
+        # per-finding write-ups) when a bounty program is active for the run. No-op
+        # otherwise, and isolated so a failure never breaks the core report path.
+        try:
+            from strix.bounty.report import write_bounty_artifacts
+
+            write_bounty_artifacts(run_dir, self.vulnerability_reports)
+        except Exception:
+            logger.exception("bounty artifact write failed (non-fatal)")
+
         write_run_record(run_dir, self.run_record)
 
         logger.info("Essential scan data saved to: %s", run_dir)

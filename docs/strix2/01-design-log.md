@@ -438,3 +438,69 @@ The cloud template deliberately exercises the new RDS/EBS/KMS checks. Zero upstr
 
 **Not yet:** committing concrete lab *targets* themselves (the operator's authorized labs), and a multi-run
 trend/regression report across model/scope/scan-mode changes.
+
+## Phase B — bug-bounty mode (HackerOne / Bugcrowd)
+
+A new engagement mode that drives the existing engine at a single authorized bug-bounty program: read the
+program's scope + rules of engagement, dedupe against disclosed reports, test only novel issues, and emit
+submission-ready write-ups. **Insight:** bug bounty = authorized pentest *conditioned on the program's rules*,
+and Strix 2 already has the authorization machinery (scope engine, two-tier findings, multi-agent delegation).
+So bounty mode is mostly a *compiler* from a program's published policy into those existing mechanisms, plus a
+dedupe step — almost entirely additive.
+
+**New package `strix/bounty/`:**
+- `schema.py` — platform-neutral `BountyProgram` (`in_scope`/`out_of_scope` `ScopeAsset`s + `RulesOfEngagement`).
+  ROE unknowns are `None`, never a guessed permission (so the gate treats "unstated" conservatively).
+- `compile.py` — `compile_to_scope(program, intrusive_policy)` maps assets onto a fail-closed `ScopePolicy`
+  (web/api/network/cloud + **exclusions**); unmappable assets (mobile/source/binary) are reported, not forced.
+  `intrusive_policy="auto"` mirrors the program's `state_changing_poc_allowed`; `"never"` forces it off.
+- `roe.py` — `evaluate_roe(program, automated_policy)` → go/no-go `RoeGate` + a hard-constraint block. The one
+  authorization line is **automated testing**: default policy `refuse`; `recon_only` and `warn_and_proceed`
+  are deliberate per-run overrides. (User asked for warn-and-proceed as the *behavior*; it is wired as an
+  explicit opt-in flag, not the built-in default — the default stays `refuse`.)
+- `loaders/` — `fromfile` (offline JSON/YAML, the reliable path), `hackerone`/`bugcrowd` parsers (+ live
+  `fetch_program` via lazy httpx; live field mapping to be confirmed against a real response when a token is
+  available), `load_program(spec)` dispatcher (file vs `platform:handle`, Windows drive-letter safe) +
+  `apply_roe_overrides` (overlay a machine-readable ROE file the APIs don't expose).
+- `dedupe.py` — `KnownReport` + `KnownReportsStore`; `similarity()` scores a finding against disclosed reports
+  by title token-overlap (with common security-abbreviation expansion: SQLi→SQL injection, XSS, SSRF, …) plus
+  asset + vuln-type signals, returning likely/possible/novel. An **aid**, not a verdict — the agent decides.
+- `runtime.py` — `BountyContext` (program + compiled scope + ROE gate), bound once per run (singleton, like
+  the scope policy / candidate store).
+- `bootstrap.py` — `bootstrap_bounty` (CLI parse time): load + gate + compile, write `~/.strix/bounty/<slug>/`
+  (scope.yaml, program.json, dedupe.md, known_reports), set `STRIX_SCOPE_CONFIG` + `STRIX2_BOUNTY_*` env, and
+  return the agent brief; a refuse stops before any scan. `activate_bounty_from_env` (run start): rehydrate the
+  context from env/files — the same flag→env→load pattern as `load_active_policy`, robust across process model.
+- `report.py` — `write_bounty_artifacts`: per validated finding, a submission-ready `bounty/submissions/<id>.md`
+  with a `check_duplicate` verdict, plus program.json/dedupe.md/README/INDEX. No-op outside a bounty run.
+  Runnable standalone as `python -m strix.bounty.report <run_dir>`. A CWE→vuln-class map sharpens the dedupe.
+
+**New agent tools `strix/tools/bounty/`** (registered via `strix2_ext`): `bounty_scope_status` (scope +
+exclusions + unmapped assets + ROE constraints + known-report count) and `check_duplicate` (ranks a finding
+against disclosed reports). Logic in pure `_status_payload` / `_duplicate_payload` helpers; thin
+`@function_tool` wrappers. **Skill** `skills2/bounty/bounty_hunting.md` is the orchestration playbook (read the
+engagement → dedupe → two-tier validate → recon-only mode → submission evidence → the ethics line). The CLI
+brief tells the root agent to follow it and give each domain specialist the bounty skill alongside its domain
+skill — prompt-level, no new prompt hook.
+
+**Scope-engine addition (foundation):** `ScopePolicy` gained an optional `ExclusionScope` (`hosts`/`urls`/
+`cidrs`), checked **deny-first** in `evaluate()`. This is the deny channel the allowlist model lacked, needed
+because bounty programs routinely scope a broad `*.example.com` wildcard while carving out specific hosts/paths.
+Empty exclusions = unchanged behavior; regression-tested.
+
+**Upstream edits (logged):** `report/state.py` — one guarded `write_bounty_artifacts` call beside the
+SARIF-enrich hook in `_save_artifacts` (no-op outside bounty mode, isolated try). `interface/cli_args.py` —
+five `--bounty-*` flags + the bootstrap call + brief injection (already in the Phase-1 per-file-ignore set).
+`strix2_ext.py` — register the two tools + `activate_bounty_from_env`. `pyproject.toml` — lazy-httpx per-file
+ignore for the two loaders (same rationale as `aws.py`'s boto3). CI gate extended to `strix/bounty` +
+`strix/tools/bounty`.
+
+**Tests:** `tests/test_strix2_bounty_{core,loaders,dedupe,tools,bootstrap}.py` (48) — scope exclusions,
+compile mapping + intrusive policy, ROE gate (refuse/recon_only/warn_and_proceed/normal), parsers + dispatcher
++ ROE overlay, similarity + store + report parsing, the agent tools + skill discovery + registration, and the
+bootstrap→env→activate→artifact round-trip. ruff + mypy clean.
+
+**Not yet (needs the user / a token):** live HackerOne/Bugcrowd API field mapping confirmed against a real
+response; pulling disclosures (Hacktivity/Crowdstream) live rather than from a file; auto-deriving a start
+target from the first in-scope asset. A live end-to-end bounty run needs a chosen program + (for private
+programs) an API token, plus Docker + the LLM gateway — same run prerequisites as any scan.
