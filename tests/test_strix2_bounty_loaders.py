@@ -55,6 +55,19 @@ def test_parse_hackerone_without_handle_raises() -> None:
         hackerone.parse_program({"data": {"attributes": {}}})
 
 
+def test_parse_hackerone_bare_object_shape() -> None:
+    # The live /hackers/programs/{handle} endpoint returns the program object at the
+    # TOP LEVEL (no {"data": ...} wrapper). Verified against the real API 2026-10-03.
+    payload = json.loads((_FIXTURES / "hackerone_program_bare.json").read_text(encoding="utf-8"))
+    program = hackerone.parse_program(payload)
+    assert program.handle == "acme"
+    assert [a.identifier for a in program.in_scope] == ["*.acme.com"]
+    assert [a.identifier for a in program.out_of_scope] == ["excluded.acme.com"]
+    p = compile_to_scope(program).policy
+    assert p.evaluate("https://x.acme.com").allowed
+    assert not p.evaluate("https://excluded.acme.com").allowed
+
+
 # --- Bugcrowd parser ---------------------------------------------------------
 
 

@@ -54,6 +54,10 @@ HackerOne exposes no machine-readable "automated testing allowed" flag or numeri
 free-text policy). Encode those as real rules with a companion ROE file via `--bounty-roe roe.yaml` (same
 fields as the `roe:` block above); it is overlaid on whatever the API returned.
 
+> **Platform support:** the HackerOne live pull is verified against the real API. The Bugcrowd live pull
+> expects a Bugcrowd **API token** (not a web session cookie); Bugcrowd has no clean researcher REST API, so
+> for Bugcrowd prefer **path A** (paste the program's brief into a file).
+
 ## 2. Run it
 
 ```bash

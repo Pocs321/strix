@@ -500,7 +500,17 @@ compile mapping + intrusive policy, ROE gate (refuse/recon_only/warn_and_proceed
 + ROE overlay, similarity + store + report parsing, the agent tools + skill discovery + registration, and the
 bootstrap→env→activate→artifact round-trip. ruff + mypy clean.
 
-**Not yet (needs the user / a token):** live HackerOne/Bugcrowd API field mapping confirmed against a real
-response; pulling disclosures (Hacktivity/Crowdstream) live rather than from a file; auto-deriving a start
-target from the first in-scope asset. A live end-to-end bounty run needs a chosen program + (for private
-programs) an API token, plus Docker + the LLM gateway — same run prerequisites as any scan.
+**Live API verification (2026-10-03, with a real token).** HackerOne: fixed — the live
+`/hackers/programs/{handle}` endpoint returns the program object at the **top level** (no `{"data": ...}`
+wrapper, unlike the collection shape the first parser assumed), so `parse_program` now accepts both shapes and
+`fetch_program` pages the dedicated `/structured_scopes` endpoint (the inline relationship can be truncated)
+and merges. Verified against `usestrix/strix`'s own `security` program (26 in-scope / 8 exclusions, wildcards +
+policy mapped correctly); regression-guarded by `tests/fixtures/bounty/hackerone_program_bare.json` +
+`test_parse_hackerone_bare_object_shape`. Bugcrowd: **not** usable via REST with a web **session JWT**
+(`identity.bugcrowd.com`) — `api.bugcrowd.com` returned 404 for that token; Bugcrowd has no clean researcher
+REST API like H1's, so the reliable Bugcrowd path is the **offline file** (`--bounty-program ./file.yaml`) and
+`bugcrowd.fetch_program` stays best-effort/unverified (needs a real Bugcrowd API token, not a session cookie).
+
+**Not yet:** pull disclosures (Hacktivity/Crowdstream) live rather than from a file; auto-derive a start target
+from the first in-scope asset. A live end-to-end bounty run also needs Docker + the LLM gateway — same
+prerequisites as any scan.

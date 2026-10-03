@@ -52,8 +52,15 @@ def _asset_from_scope(attrs: dict[str, Any]) -> ScopeAsset | None:
 
 
 def parse_program(payload: dict[str, Any]) -> BountyProgram:
-    """Parse a HackerOne program API payload into a :class:`BountyProgram`."""
-    data = payload.get("data") or {}
+    """Parse a HackerOne program API payload into a :class:`BountyProgram`.
+
+    Accepts both the single-program Hacker-API shape (the program object at the top
+    level: ``{id, type, attributes, relationships}``) and a ``{"data": {...}}``
+    wrapper (the collection/JSON:API style used by saved exports and fixtures).
+    """
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = payload
     attrs = data.get("attributes") or {}
     handle = (attrs.get("handle") or "").strip()
     if not handle:
@@ -87,6 +94,9 @@ def parse_program(payload: dict[str, Any]) -> BountyProgram:
     )
 
 
+_MAX_SCOPE_PAGES = 50
+
+
 def fetch_program(
     handle: str,
     *,
@@ -96,21 +106,42 @@ def fetch_program(
 ) -> BountyProgram:
     """Fetch a program live from the HackerOne Hacker API (HTTP Basic auth).
 
-    Requires a HackerOne API identifier (``api_username``) and token. Network/auth
-    failures raise :class:`BountyLoadError`.
+    Two calls: the program object (handle / name / policy) and its full, paginated
+    ``structured_scopes`` list — the inline relationship on the program object can be
+    truncated, so the dedicated endpoint is the authoritative scope source. The two
+    are merged into one payload and handed to :func:`parse_program`. Requires a
+    HackerOne API identifier (``api_username``) and token; failures raise
+    :class:`BountyLoadError`.
     """
     import httpx
 
-    url = f"{H1_API_BASE}/hackers/programs/{handle}"
+    auth = (api_username, api_token)
+    headers = {"Accept": "application/json"}
+    base = f"{H1_API_BASE}/hackers/programs/{handle}"
     try:
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.get(
-                url,
-                auth=(api_username, api_token),
-                headers={"Accept": "application/json"},
-            )
+        with httpx.Client(timeout=timeout, auth=auth, headers=headers) as client:
+            resp = client.get(base)
             resp.raise_for_status()
-            payload = resp.json()
+            program_obj = resp.json()
+
+            scopes: list[dict[str, Any]] = []
+            url: str | None = f"{base}/structured_scopes?page[size]=100"
+            pages = 0
+            while url and pages < _MAX_SCOPE_PAGES:
+                sresp = client.get(url)
+                sresp.raise_for_status()
+                body = sresp.json()
+                page_data = body.get("data")
+                if isinstance(page_data, list):
+                    scopes.extend(x for x in page_data if isinstance(x, dict))
+                url = (body.get("links") or {}).get("next")
+                pages += 1
     except httpx.HTTPError as exc:
         raise BountyLoadError(f"HackerOne API request for {handle!r} failed: {exc}") from exc
-    return parse_program(payload)
+
+    # Normalize to the shape parse_program reads: the program object with the full
+    # scope list injected as its structured_scopes relationship.
+    obj = program_obj.get("data") if isinstance(program_obj.get("data"), dict) else program_obj
+    if scopes:
+        obj.setdefault("relationships", {})["structured_scopes"] = {"data": scopes}
+    return parse_program(obj)
