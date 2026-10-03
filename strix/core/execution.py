@@ -33,6 +33,7 @@ from strix.core.sessions import (
     seed_initial_input,
     strip_all_images_from_session,
 )
+from strix.guard.stall import load_stall_limits, noninteractive_recovery_limit
 from strix.llm import request_log
 from strix.llm.compaction import is_context_overflow, maybe_compact
 
@@ -511,7 +512,14 @@ async def _run_until_lifecycle(
     """
     result: RunResultBase | None = None
     input_data: Any = initial_input
-    recovery_limit = _INTERACTIVE_TOOL_RECOVERY_LIMIT if interactive else max(1, max_turns)
+    # Strix 2: cap consecutive no-tool-call recoveries so a model that returns empty
+    # turns can't force continuation for the whole max_turns budget (an unbounded
+    # empty-output loop once ground a run to ~$63). A productive turn resets this.
+    recovery_limit = (
+        _INTERACTIVE_TOOL_RECOVERY_LIMIT
+        if interactive
+        else noninteractive_recovery_limit(max_turns, load_stall_limits())
+    )
 
     while True:
         if coordinator.budget_stopped:

@@ -43,6 +43,7 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.guard.checkpoint import install_sigterm_as_interrupt, restore_sigterm
 from strix.guard.hooks import build_run_hooks
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
@@ -361,6 +362,11 @@ async def run_strix_scan(
     sessions_to_close: list[SQLiteSession] = []
     mcp_registry: McpRegistry | None = None
 
+    # Strix 2: route a SIGTERM (host time-limit / docker stop / session shutdown)
+    # through the interrupt path below so the scan tears the sandbox down and
+    # snapshots for --resume, instead of dying abruptly and leaking the container.
+    sigterm_token = install_sigterm_as_interrupt()
+
     try:
         targets = scan_config.get("targets") or []
         scan_mode = str(scan_config.get("scan_mode") or "deep")
@@ -649,6 +655,7 @@ async def run_strix_scan(
                 await coordinator.set_status(root_id, "failed")
         raise
     finally:
+        restore_sigterm(sigterm_token)
         configure_spill_writer(None)
         # Settle descendants before closing sessions: on a clean finish a child
         # can still be mid-turn, and closing its session underneath it crashes it.
